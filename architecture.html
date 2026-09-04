@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Architecture — Grounded Finance Assistant</title>
+<style>
+  :root {
+    --ground:#f6f7f6; --surface:#fff; --surface-2:#f0f2f1;
+    --ink:#16202b; --ink-2:#4a5763; --ink-3:#78848e;
+    --line:#dfe4e3; --line-2:#eaedec;
+    --accent:#0f6d63; --accent-soft:#e3f0ee; --accent-ink:#0a4f48;
+    --warn:#a86a10; --warn-soft:#fbf0dc;
+    --mono: ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --sans: system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:#0e1417; --surface:#151d21; --surface-2:#1b2429;
+      --ink:#e6ecea; --ink-2:#a8b5b3; --ink-3:#7d8b8a;
+      --line:#263238; --line-2:#1f2a2f;
+      --accent:#4fbcae; --accent-soft:#16302e; --accent-ink:#7fd4c8;
+      --warn:#d9a441; --warn-soft:#2b2314;
+    }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--ground); color:var(--ink);
+         font:15px/1.6 var(--sans); -webkit-font-smoothing:antialiased; }
+  .page { max-width:900px; margin:0 auto; padding:40px 22px 80px; }
+
+  header { border-bottom:1px solid var(--line); padding-bottom:22px; margin-bottom:34px; }
+  h1 { margin:0 0 6px; font-size:27px; letter-spacing:-0.02em; font-weight:660; }
+  .sub { margin:0; color:var(--ink-2); font-size:16px; max-width:64ch; }
+  .thesis { margin:18px 0 0; padding:13px 15px; background:var(--accent-soft);
+            border-left:3px solid var(--accent); border-radius:0 7px 7px 0;
+            color:var(--accent-ink); font-size:15px; max-width:70ch; }
+
+  h2 { margin:44px 0 6px; font-size:19px; font-weight:640; letter-spacing:-0.012em; }
+  h2 .n { color:var(--ink-3); font-weight:500; margin-right:9px; font-variant-numeric:tabular-nums; }
+  h3 { margin:26px 0 6px; font-size:15px; font-weight:620; }
+  p  { margin:0 0 12px; max-width:70ch; }
+  .lede { color:var(--ink-2); }
+
+  figure { margin:22px 0 10px; padding:20px 16px 14px; background:var(--surface);
+           border:1px solid var(--line); border-radius:11px; }
+  svg { display:block; margin:0 auto; max-width:100%; height:auto; }
+  figcaption { margin-top:14px; padding-top:12px; border-top:1px solid var(--line-2);
+               font-size:13px; color:var(--ink-3); text-align:center; }
+
+  table { width:100%; border-collapse:collapse; font-size:13.5px; margin:14px 0 8px; }
+  th { text-align:left; font-weight:620; color:var(--ink-2); padding:8px 11px;
+       border-bottom:1px solid var(--line); background:var(--surface-2); }
+  td { padding:8px 11px; border-bottom:1px solid var(--line-2); vertical-align:top; }
+  tr:last-child td { border-bottom:none; }
+  .num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .tbl-wrap { overflow-x:auto; border:1px solid var(--line); border-radius:9px; }
+  code { font:12.5px var(--mono); background:var(--surface-2); padding:1px 5px; border-radius:4px; }
+  .k { color:var(--accent-ink); font-weight:600; }
+  .warn { color:var(--warn); }
+
+  .cards { display:grid; gap:11px; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); margin:16px 0; }
+  .card { padding:13px 14px; background:var(--surface); border:1px solid var(--line); border-radius:9px; }
+  .card .big { font:620 21px/1.2 var(--sans); font-variant-numeric:tabular-nums; letter-spacing:-0.02em; }
+  .card .lbl { font-size:12px; color:var(--ink-3); margin-top:3px; }
+
+  .callout { margin:16px 0; padding:13px 15px; border-radius:8px;
+             background:var(--warn-soft); border-left:3px solid var(--warn);
+             font-size:14px; color:var(--ink); }
+  .callout strong { color:var(--warn); }
+  ul { margin:0 0 12px; padding-left:20px; max-width:70ch; }
+  li { margin-bottom:5px; }
+</style>
+</head>
+<body>
+<div class="page">
+
+<header>
+  <h1>Grounded Finance Assistant</h1>
+  <p class="sub">Architecture walkthrough — TBX / BVP Tech Catalyst.</p>
+  <p class="thesis">
+    The model decides <em>what</em> to compute. Postgres computes it. The model's
+    words are then checked against the result before anyone sees them.
+    No number the assistant states can originate from the model.
+  </p>
+</header>
+
+<h2><span class="n">01</span>The decision everything follows from</h2>
+<p class="lede">
+  The obvious build is text-to-SQL: let the model write a query, run it, show the answer.
+  We deliberately did not. The problem statement rules it out in one sentence —
+  <em>“aggregate the data correctly <strong>before</strong> handing results to the language
+  model, so the model explains a computed result rather than calculating one itself.”</em>
+</p>
+
+<div class="tbl-wrap">
+<table>
+  <thead><tr><th></th><th>Text-to-SQL</th><th>Extract → compile (ours)</th></tr></thead>
+  <tbody>
+    <tr><td>Model produces</td><td>Free-form SQL</td><td>A small typed JSON object</td></tr>
+    <tr><td>Can emit invalid SQL?</td><td>Yes</td><td><span class="k">No</span> — Python writes the SQL</td></tr>
+    <tr><td>Can invent a number?</td><td>Yes</td><td><span class="k">No</span> — arithmetic only in Postgres</td></tr>
+    <tr><td>Small-model reliability</td><td>Poor — generation is hard</td><td><span class="k">Good</span> — extraction is easy</td></tr>
+    <tr><td>Guardrails attach</td><td>After generation, awkwardly</td><td><span class="k">Before compute</span>, on a typed object</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>
+  That reframe is also why a 7B model is viable: we ask it to do <strong>extraction</strong>,
+  not <strong>generation</strong>. Filling a fixed schema is what small models are good at.
+  The 20&nbsp;% model-efficiency criterion turns from a constraint into an advantage.
+</p>
+
+<h2><span class="n">02</span>The request pipeline</h2>
+
+<figure>
+<svg viewBox="0 0 820 700" role="img"
+     aria-label="Vertical pipeline: a question passes through an LLM extraction step, then deterministic validation, entity and ambiguity resolution, SQL compilation, execution in Postgres where all arithmetic happens, a second LLM step that narrates the resulting rows, and a verification gate that checks every number against those rows before the answer is shown. Ambiguity can branch out to ask the user; failed verification loops back to regenerate.">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+
+  <g font-family="system-ui, sans-serif" fill="currentColor">
+
+    <!-- left gutter tags -->
+    <g font-size="10.5" text-anchor="end" opacity="0.55">
+      <text x="126" y="123">generative</text>
+      <text x="126" y="339">deterministic</text>
+      <text x="126" y="411">source of truth</text>
+      <text x="126" y="483">generative</text>
+      <text x="126" y="555">deterministic</text>
+    </g>
+
+    <!-- 1 question -->
+    <rect x="140" y="20" width="280" height="52" rx="8" fill="none"
+          stroke="currentColor" stroke-width="1.2" opacity="0.5"/>
+    <text x="280" y="43" font-size="13" text-anchor="middle" font-weight="600">User question</text>
+    <text x="280" y="60" font-size="11" text-anchor="middle" opacity="0.6">“Spend by fund type last quarter”</text>
+    <line x1="280" y1="72" x2="280" y2="90" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar)"/>
+
+    <!-- 2 extract (LLM) -->
+    <rect x="140" y="92" width="280" height="52" rx="8" fill="none"
+          stroke="var(--accent)" stroke-width="1.6" stroke-dasharray="5 3"/>
+    <text x="280" y="115" font-size="13" text-anchor="middle" font-weight="600"
+          fill="var(--accent-ink)">LLM call 1 · extract</text>
+    <text x="280" y="132" font-size="11" text-anchor="middle" opacity="0.7">question → QuerySpec (JSON-schema constrained)</text>
+    <line x1="280" y1="144" x2="280" y2="162" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar)"/>
+
+    <!-- 3 validate -->
+    <rect x="140" y="164" width="280" height="52" rx="8" fill="none"
+          stroke="currentColor" stroke-width="1.2"/>
+    <text x="280" y="187" font-size="13" text-anchor="middle" font-weight="600">Validate</text>
+    <text x="280" y="204" font-size="11" text-anchor="middle" opacity="0.7">closed vocabularies · contradictions rejected</text>
+    <line x1="280" y1="216" x2="280" y2="234" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar)"/>
+
+    <!-- 4 resolve -->
+    <rect x="140" y="236" width="280" height="52" rx="8" fill="none"
+          stroke="currentColor" stroke-width="1.2"/>
+    <text x="280" y="259" font-size="13" text-anchor="middle" font-weight="600">Resolve</text>
+    <text x="280" y="276" font-size="11" text-anchor="middle" opacity="0.7">vendors · coverage · ambiguity probes</text>
+
+    <!-- branch: clarify -->
+    <line x1="420" y1="262" x2="472" y2="262" stroke="currentColor"
+          stroke-width="1.3" marker-end="url(#ar)"/>
+    <text x="446" y="254" font-size="9.5" text-anchor="middle" opacity="0.65">material gap</text>
+    <rect x="474" y="236" width="300" height="52" rx="8" fill="none"
+          stroke="var(--accent)" stroke-width="1.3"/>
+    <text x="624" y="259" font-size="12.5" text-anchor="middle" font-weight="600"
+          fill="var(--accent-ink)">Ask the user</text>
+    <text x="624" y="276" font-size="11" text-anchor="middle" opacity="0.7">both readings priced, then stop</text>
+
+    <line x1="280" y1="288" x2="280" y2="306" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar)"/>
+
+    <!-- 5 compile -->
+    <rect x="140" y="308" width="280" height="52" rx="8" fill="none"
+          stroke="currentColor" stroke-width="1.2"/>
+    <text x="280" y="331" font-size="13" text-anchor="middle" font-weight="600">Compile → SQL</text>
+    <text x="280" y="348" font-size="11" text-anchor="middle" opacity="0.7">pure Python · bound parameters only</text>
+    <line x1="280" y1="360" x2="280" y2="378" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar)"/>
+
+    <!-- 6 postgres -->
+    <rect x="140" y="380" width="280" height="52" rx="8" fill="var(--accent-soft)"
+          stroke="var(--accent)" stroke-width="1.8"/>
+    <text x="280" y="403" font-size="13" text-anchor="middle" font-weight="660"
+          fill="var(--accent-ink)">PostgreSQL</text>
+    <text x="280" y="420" font-size="11" text-anchor="middle" fill="var(--accent-ink)"
+          opacity="0.85">every SUM and GROUP BY, in NUMERIC(18,2)</text>
+    <line x1="280" y1="432" x2="280" y2="450" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar)"/>
+    <text x="292" y="446" font-size="9.5" opacity="0.65">result rows</text>
+
+    <!-- 7 narrate (LLM) -->
+    <rect x="140" y="452" width="280" height="52" rx="8" fill="none"
+          stroke="var(--accent)" stroke-width="1.6" stroke-dasharray="5 3"/>
+    <text x="280" y="475" font-size="13" text-anchor="middle" font-weight="600"
+          fill="var(--accent-ink)">LLM call 2 · narrate</text>
+    <text x="280" y="492" font-size="11" text-anchor="middle" opacity="0.7">sees only the rows · forbidden to compute</text>
+    <line x1="280" y1="504" x2="280" y2="522" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar)"/>
+
+    <!-- 8 verify -->
+    <rect x="140" y="524" width="280" height="52" rx="8" fill="none"
+          stroke="currentColor" stroke-width="1.6"/>
+    <text x="280" y="547" font-size="13" text-anchor="middle" font-weight="600">Verify every number</text>
+    <text x="280" y="564" font-size="11" text-anchor="middle" opacity="0.7">each figure must exist in the rows above</text>
+
+    <!-- retry loop -->
+    <path d="M 420 550 H 452 V 478 H 424" fill="none" stroke="currentColor"
+          stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#ar)" opacity="0.75"/>
+    <text x="462" y="518" font-size="9.5" opacity="0.65">fails →</text>
+    <text x="462" y="530" font-size="9.5" opacity="0.65">retry, then</text>
+    <text x="462" y="542" font-size="9.5" opacity="0.65">template</text>
+
+    <line x1="280" y1="576" x2="280" y2="594" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar)"/>
+
+    <!-- 9 answer -->
+    <rect x="140" y="596" width="280" height="52" rx="8" fill="none"
+          stroke="currentColor" stroke-width="1.2" opacity="0.5"/>
+    <text x="280" y="619" font-size="13" text-anchor="middle" font-weight="600">Answer</text>
+    <text x="280" y="636" font-size="11" text-anchor="middle" opacity="0.6">prose + breakdown table + provenance panel</text>
+
+    <!-- legend -->
+    <g transform="translate(474, 596)" font-size="10.5">
+      <rect x="0" y="-8" width="26" height="13" rx="3" fill="none"
+            stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="4 3"/>
+      <text x="34" y="2" opacity="0.7">model — never sees a total it did not receive</text>
+      <rect x="0" y="14" width="26" height="13" rx="3" fill="none"
+            stroke="currentColor" stroke-width="1.2"/>
+      <text x="34" y="24" opacity="0.7">code — deterministic, testable, no model</text>
+    </g>
+  </g>
+</svg>
+<figcaption>
+  Exactly two model calls per question, and neither one can put a number on screen:
+  the first produces a typed spec, the second may only restate rows Postgres computed.
+</figcaption>
+</figure>
+
+<p>
+  The ordering has a deliberate consequence for the UI. Rows are emitted at the
+  Postgres step, <strong>before</strong> narration begins — so real numbers appear on
+  screen at ~3.7&nbsp;s while the prose is still being written. It reads as fast, and it
+  reinforces visually that the figures came from the database.
+</p>
+
+<h2><span class="n">03</span>Where wrong answers get stopped</h2>
+<p class="lede">
+  Accuracy and grounding is the largest single criterion at 30&nbsp;%. Five layers, each
+  cheap, each catching a different failure. Every figure below was measured against our
+  1,019,354-row build.
+</p>
+
+<div class="tbl-wrap">
+<table>
+  <thead><tr><th>Layer</th><th>Catches</th><th>Measured example</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><strong>1 · Schema</strong><br><span style="color:var(--ink-3)">pydantic</span></td>
+      <td>Invented dimensions, metrics, statuses; contradictory date fields</td>
+      <td>Model paired a fiscal year with an Apr–Mar window — rejected, repaired on retry</td>
+    </tr>
+    <tr>
+      <td><strong>2 · Sanity pass</strong><br><span style="color:var(--ink-3)">deterministic</span></td>
+      <td>Right shape, wrong question — and filters nobody asked for</td>
+      <td>“last quarter” routed to a whole fiscal year: <span class="warn">$16.8B instead of $5.1B</span></td>
+    </tr>
+    <tr>
+      <td><strong>3 · Coverage</strong></td>
+      <td>Periods outside the data</td>
+      <td>“December 2026” returns <em>no data for that period</em> — never <code>$0.00</code></td>
+    </tr>
+    <tr>
+      <td><strong>4 · Ambiguity</strong><br><span style="color:var(--ink-3)">probe, then decide</span></td>
+      <td>Questions with two defensible answers</td>
+      <td>“FY2026” differs by <span class="warn">$1,337,116,299</span> between readings</td>
+    </tr>
+    <tr>
+      <td><strong>5 · Provenance</strong><br><span style="color:var(--ink-3)">post-narration</span></td>
+      <td>Any figure in the prose absent from the rows</td>
+      <td>A <span class="warn">$1 error</span> on a $1.07B total is caught; “$1.07 billion” is accepted</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h3>Layer 4 is the one worth explaining slowly</h3>
+<p>
+  Ambiguity is not a property of the question — it is a property of the question
+  <em>against this data</em>. “How much did we spend last month” is ambiguous in principle
+  (paid vs committed); if pending is zero that month it is not ambiguous in fact, and
+  asking is friction.
+</p>
+<p>
+  So we never ask the model whether something is ambiguous. We detect candidate readings
+  with rules, <strong>run each one as a cheap scalar query</strong>, and decide from the
+  measured gap. Under 1&nbsp;% we answer silently; up to 10&nbsp;% we answer and state the
+  assumption; beyond that we ask — showing the real number for each option, so the user
+  recognises their intent instead of parsing jargon. Zero extra model calls.
+</p>
+
+<div class="callout">
+  <strong>The correction worth mentioning to judges.</strong> Percentage alone was the wrong
+  test. The FY2026 fork measures only 7.4&nbsp;% — below our ask threshold — but 7.4&nbsp;%
+  of $18B is <strong>$1.34 billion</strong>. A second trigger now fires on absolute gap
+  (0.5&nbsp;% of total spend, so it scales with whatever dataset is loaded).
+</div>
+
+<h2><span class="n">04</span>Data model</h2>
+
+<figure>
+<svg viewBox="0 0 820 400" role="img"
+     aria-label="Star schema: a central transactions fact table joined to vendors, departments, chart of accounts and funds dimension tables, with a one-to-one reconciliation table and a vendor payouts rollup.">
+  <defs>
+    <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <g font-family="system-ui, sans-serif" fill="currentColor">
+
+    <!-- fact -->
+    <rect x="300" y="158" width="220" height="72" rx="9" fill="var(--accent-soft)"
+          stroke="var(--accent)" stroke-width="1.8"/>
+    <text x="410" y="184" font-size="13.5" text-anchor="middle" font-weight="660"
+          fill="var(--accent-ink)">transactions</text>
+    <text x="410" y="202" font-size="11" text-anchor="middle" fill="var(--accent-ink)" opacity="0.85">1,019,354 rows</text>
+    <text x="410" y="218" font-size="10" text-anchor="middle" fill="var(--accent-ink)" opacity="0.7">money in NUMERIC(18,2)</text>
+
+    <!-- dimensions -->
+    <rect x="36" y="60" width="186" height="46" rx="8" fill="none" stroke="currentColor" stroke-width="1.1"/>
+    <text x="129" y="80" font-size="12" text-anchor="middle" font-weight="600">departments</text>
+    <text x="129" y="96" font-size="10" text-anchor="middle" opacity="0.6">58</text>
+
+    <rect x="36" y="170" width="186" height="46" rx="8" fill="none" stroke="currentColor" stroke-width="1.1"/>
+    <text x="129" y="190" font-size="12" text-anchor="middle" font-weight="600">vendors</text>
+    <text x="129" y="206" font-size="10" text-anchor="middle" opacity="0.6">7,905</text>
+
+    <rect x="598" y="60" width="186" height="46" rx="8" fill="none" stroke="currentColor" stroke-width="1.1"/>
+    <text x="691" y="80" font-size="12" text-anchor="middle" font-weight="600">chart_of_accounts</text>
+    <text x="691" y="96" font-size="10" text-anchor="middle" opacity="0.6">616 · 3-level hierarchy</text>
+
+    <rect x="598" y="170" width="186" height="46" rx="8" fill="none" stroke="currentColor" stroke-width="1.1"/>
+    <text x="691" y="190" font-size="12" text-anchor="middle" font-weight="600">funds</text>
+    <text x="691" y="206" font-size="10" text-anchor="middle" opacity="0.6">338</text>
+
+    <rect x="598" y="292" width="186" height="52" rx="8" fill="none" stroke="currentColor" stroke-width="1.4"/>
+    <text x="691" y="313" font-size="12" text-anchor="middle" font-weight="600">reconciliation</text>
+    <text x="691" y="330" font-size="10" text-anchor="middle" opacity="0.6">1,019,354 · synthetic layer</text>
+
+    <rect x="36" y="292" width="186" height="52" rx="8" fill="none" stroke="currentColor" stroke-width="1.1"/>
+    <text x="129" y="313" font-size="12" text-anchor="middle" font-weight="600">vendor_payouts</text>
+    <text x="129" y="330" font-size="10" text-anchor="middle" opacity="0.6">194,248 · vendor × date</text>
+
+    <!-- edges -->
+    <line x1="222" y1="83"  x2="330" y2="158" stroke="currentColor" stroke-width="1.1" opacity="0.55" marker-end="url(#ar2)"/>
+    <line x1="222" y1="193" x2="298" y2="193" stroke="currentColor" stroke-width="1.1" opacity="0.55" marker-end="url(#ar2)"/>
+    <line x1="598" y1="83"  x2="490" y2="158" stroke="currentColor" stroke-width="1.1" opacity="0.55" marker-end="url(#ar2)"/>
+    <line x1="598" y1="193" x2="522" y2="193" stroke="currentColor" stroke-width="1.1" opacity="0.55" marker-end="url(#ar2)"/>
+    <line x1="598" y1="312" x2="492" y2="232" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar2)"/>
+    <line x1="222" y1="312" x2="328" y2="232" stroke="currentColor" stroke-width="1.1" opacity="0.55" marker-end="url(#ar2)"/>
+
+    <text x="640" y="270" font-size="10" text-anchor="middle" font-weight="600">1 : 1</text>
+    <text x="250" y="150" font-size="9.5" opacity="0.6">vendor_id</text>
+    <text x="556" y="150" font-size="9.5" opacity="0.6">account_code</text>
+
+    <text x="410" y="376" font-size="10.5" text-anchor="middle" opacity="0.6">
+      6 foreign keys, all enforced — the load would have failed otherwise
+    </text>
+  </g>
+</svg>
+<figcaption>
+  A star schema with one deliberate compromise: <code>transactions</code> also stores
+  vendor, department and account <em>names</em> inline. It costs ~73&nbsp;MB and means a
+  small model writes correct SQL far more often.
+</figcaption>
+</figure>
+
+<h2><span class="n">05</span>Stack and numbers</h2>
+
+<div class="cards">
+  <div class="card"><div class="big">2</div><div class="lbl">model calls per question</div></div>
+  <div class="card"><div class="big">0</div><div class="lbl">model calls for ambiguity handling</div></div>
+  <div class="card"><div class="big">1,019,354</div><div class="lbl">transactions, 24 months</div></div>
+  <div class="card"><div class="big">18 ms</div><div class="lbl">indexed month query</div></div>
+</div>
+
+<div class="tbl-wrap">
+<table>
+  <thead><tr><th>Layer</th><th>Choice</th><th>Why this one</th></tr></thead>
+  <tbody>
+    <tr><td>Frontend</td><td>Next.js 15, App Router</td><td>Types generated from the backend schema, so the contract cannot drift</td></tr>
+    <tr><td>Transport</td><td>SSE, browser → FastAPI direct</td><td>No Next proxy — proxying SSE is a known buffering trap</td></tr>
+    <tr><td>Backend</td><td>FastAPI + psycopg3 async</td><td>psycopg maps <code>NUMERIC</code> → <code>Decimal</code> natively</td></tr>
+    <tr><td>Database</td><td>PostgreSQL 18 + pg_trgm + pgvector</td><td>Exact decimal money; trigram and semantic entity matching</td></tr>
+    <tr><td>Model</td><td>Qwen2.5-7B via Ollama</td><td>Local, free to iterate, schema-constrained decoding</td></tr>
+    <tr><td>Fallback</td><td><code>claude-haiku-4-5</code></td><td>Same interface — a config flip, decided by the bake-off</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2><span class="n">06</span>What to say if asked “why will this survive the real dataset?”</h2>
+<ul>
+  <li><strong>Nothing hardcodes the data.</strong> Statuses, categories, the fiscal-year
+      boundary and money columns are all introspected at boot into one registry.</li>
+  <li><strong>Detectors disarm themselves.</strong> If the new data has no fiscal-year
+      column, that detector switches off. Two reconciliation statuses instead of four and
+      the scope question stops being asked — no code change either way.</li>
+  <li><strong>The swap is one loader.</strong> Emit the same seven tables and everything
+      downstream is untouched. Budgeted at 2.5 hours.</li>
+</ul>
+
+<p class="lede" style="margin-top:26px; padding-top:16px; border-top:1px solid var(--line); font-size:13.5px;">
+  Companion documents: <code>PLAN.md</code> (strategy) · <code>FLOW.md</code> (interfaces)
+  · <code>AMBIGUITY.md</code> (clarification design) · <code>data/DATA_DICTIONARY.md</code> (schema).
+</p>
+
+</div>
+</body>
+</html>

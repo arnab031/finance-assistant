@@ -1,0 +1,91 @@
+# NOTE: git does not support trailing comments on a pattern line.
+# "foo/  # because" is a literal pattern, not "foo/". Comments get their own line.
+
+# ---------------------------------------------------------------------------
+# Python backend
+# rebuild: python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# real secrets and local overrides; .env.example IS committed
+.env
+
+
+# ---------------------------------------------------------------------------
+# Next.js frontend
+# node_modules 354 MB, .next 82 MB — rebuild: cd web && npm install
+# ---------------------------------------------------------------------------
+node_modules/
+.next/
+out/
+.turbo/
+next-env.d.ts
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+
+# ---------------------------------------------------------------------------
+# Generated contract
+#
+# Both are produced from api/schema.py, which IS committed. Committing the
+# outputs invites a stale copy diverging from the pydantic models - the exact
+# backend/frontend drift the generator exists to prevent.
+# regenerate: cd web && npm run gen:types
+# ---------------------------------------------------------------------------
+web/shared/schema.json
+web/lib/types.ts
+
+
+# ---------------------------------------------------------------------------
+# Data
+#
+# COMMITTED: data/raw/*.csv.gz (31 MB) - the expensive artifact. Re-fetching is
+# ~15 min of API calls and needs network, which a hackathon venue may not have.
+#
+# IGNORED below: all derived from data/raw, rebuilds offline in ~2 min via
+# scripts/02_normalize.py.
+# ---------------------------------------------------------------------------
+data/finance.db
+data/processed/
+data/postgres/
+data/raw/_download.log
+
+
+# ---------------------------------------------------------------------------
+# Local runtime noise
+# ---------------------------------------------------------------------------
+*.log
+*.pid
+
+
+# ---------------------------------------------------------------------------
+# macOS / iCloud
+#
+# This project lives in iCloud Drive. `.nosync` exempts a heavy directory from
+# syncing - e.g. mkdir data/db.nosync && mv data/finance.db there.
+# ---------------------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+*.icloud
+*.nosync
+
+
+# ---------------------------------------------------------------------------
+# Editors
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+.ipynb_checkpoints/
