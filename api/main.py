@@ -15,6 +15,7 @@ from api.db import db
 from api.llm.base import get_llm
 from api.registry import SemanticRegistry
 from api.routes import ask as ask_routes
+from api.routes import ops as ops_routes
 
 log = logging.getLogger("tbx")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -39,7 +40,13 @@ async def lifespan(app: FastAPI):
     await db.close()
 
 
-app = FastAPI(title="TBX Finance Assistant", version="0.1.0", lifespan=lifespan)
+app = FastAPI(
+    title="Finsight",
+    description="Grounded answers from your ledger. Every figure computed in SQL "
+                "and verified against the source rows before it is shown.",
+    version="0.1.0",
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -59,6 +66,7 @@ async def no_buffering(request, call_next):
 
 
 app.include_router(ask_routes.router)
+app.include_router(ops_routes.router)
 
 
 @app.get("/api/coverage")
@@ -70,6 +78,63 @@ async def coverage():
         "currency": "USD", "vendor_count": r.vendor_count,
         "categories": r.categories, "payment_statuses": r.payment_statuses,
         "reconciliation_statuses": r.recon_statuses,
+    }
+
+
+# Thresholds are stated here rather than buried in a dashboard, so the
+# definition of "unhealthy" is reviewable. Each bound is set from behaviour this
+# build actually exhibited, not from a round number.
+THRESHOLDS = {
+    "verification_pass_rate":  (">=", 0.95),   # figures traceable to the rows
+    "template_fallback_rate":  ("<=", 0.10),   # model could not narrate cleanly
+    "repair_rate":             ("<=", 0.10),   # extraction contradicting itself
+    "coercion_rate":           ("<=", 0.02),   # two strict failures in a row
+    "sanity_correction_rate":  ("<=", 0.15),   # model ignoring the prompt
+    "clarify_rate":            ("<=", 0.35),   # above this it is nagging
+    "empty_result_rate":       ("<=", 0.10),   # filters resolving to nothing
+    "error_rate":              ("<=", 0.02),
+    "p95_ms":                  ("<=", 20000),
+}
+
+
+@app.get("/api/metrics")
+async def metrics(hours: int = 24):
+    """Rolling health signals, each with a pass/fail verdict.
+
+    Correctness rates are computed over ANSWERED requests: a clarification or an
+    out-of-coverage refusal is correct behaviour and must not dilute them.
+    """
+    row = await db.fetchone("SELECT * FROM v_health")
+    if not row:
+        return {"ok": True, "requests": 0, "signals": {}}
+
+    signals, breaches = {}, []
+    for name, (op, bound) in THRESHOLDS.items():
+        value = row.get(name)
+        if value is None:
+            signals[name] = {"value": None, "status": "no_data"}
+            continue
+        value = float(value)
+        healthy = value >= bound if op == ">=" else value <= bound
+        signals[name] = {"value": value, "threshold": f"{op} {bound}",
+                         "status": "ok" if healthy else "BREACH"}
+        if not healthy:
+            breaches.append(name)
+
+    incidents = await db.fetch(
+        "SELECT id, issue, LEFT(question,70) AS question, unverified, "
+        "sanity_corrected, total_ms FROM v_incidents LIMIT 10")
+
+    return {
+        "ok": not breaches,
+        "window_hours": hours,
+        "requests": row["requests"],
+        "answered": row["answered"],
+        "breaches": breaches,
+        "signals": signals,
+        "latency": {"p50_ms": row["p50_ms"], "p95_ms": row["p95_ms"],
+                    "avg_tokens": row["avg_tokens"]},
+        "recent_incidents": [dict(i) for i in incidents],
     }
 
 

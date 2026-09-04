@@ -1,0 +1,347 @@
+# Golden question set.
+#
+# Ground truth is a QUERY, never a literal. It is recomputed on every run, so it
+# cannot go stale and it survives a dataset swap without editing 50 numbers.
+#
+# grade:
+#   numeric    the answer must match truth_sql. `compare` picks what is compared:
+#              first (default) = first row's `value`; sum = total of the column;
+#              rows = number of rows returned.
+#   spec       named QuerySpec fields must match. Isolates EXTRACTION from the
+#              compiler: if spec passes but numeric fails, the compiler broke.
+#   behaviour  the assistant must clarify / refuse / decline. No number involved.
+#
+# Reference dates (settings.reference_date = wall clock, data ends 2026-08-29):
+#   "last month"   = August 2026        "last quarter"   = Q2 2026 (Apr-Jun)
+#   "last 12 months" = 2025-09 .. 2026-08
+
+# ---------------------------------------------------------------- simple aggregate
+- id: q001
+  question: How much did we spend on vendor payouts last month?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(amount_paid) FROM transactions
+    WHERE transaction_date >= DATE '2026-08-01' AND transaction_date < DATE '2026-09-01'
+
+- id: q002
+  question: What was our total spend across all the data?
+  grade: numeric
+  truth_sql: SELECT SUM(amount_paid) FROM transactions
+
+- id: q003
+  question: How many transactions were there last month?
+  grade: numeric
+  truth_sql: >
+    SELECT COUNT(*) FROM transactions
+    WHERE transaction_date >= DATE '2026-08-01' AND transaction_date < DATE '2026-09-01'
+
+- id: q004
+  question: How many different vendors did we pay in August 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT COUNT(DISTINCT vendor_id) FROM transactions
+    WHERE transaction_date >= DATE '2026-08-01' AND transaction_date < DATE '2026-09-01'
+
+- id: q005
+  question: How much did we spend in July 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(amount_paid) FROM transactions
+    WHERE transaction_date >= DATE '2026-07-01' AND transaction_date < DATE '2026-08-01'
+
+- id: q006
+  question: How much did we spend last quarter?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(amount_paid) FROM transactions
+    WHERE transaction_date >= DATE '2026-04-01' AND transaction_date < DATE '2026-07-01'
+
+- id: q007
+  question: What did we spend in the last 12 months?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(amount_paid) FROM transactions
+    WHERE transaction_date >= DATE '2025-09-01' AND transaction_date < DATE '2026-09-01'
+
+- id: q008
+  question: How much did we spend in June 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(amount_paid) FROM transactions
+    WHERE transaction_date >= DATE '2026-06-01' AND transaction_date < DATE '2026-07-01'
+
+# ---------------------------------------------------------------- filtered
+- id: q009
+  question: How much is still pending?
+  grade: numeric
+  truth_sql: SELECT SUM(amount_pending) FROM transactions WHERE payment_status = 'Pending'
+
+- id: q010
+  question: How much is held as retainage?
+  grade: numeric
+  truth_sql: SELECT SUM(amount_retainage) FROM transactions WHERE payment_status = 'Retainage Held'
+
+- id: q011
+  question: How much did the Public Health department spend last month?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(amount_paid) FROM transactions
+    WHERE department_name = 'DPH Public Health'
+      AND transaction_date >= DATE '2026-08-01' AND transaction_date < DATE '2026-09-01'
+
+- id: q012
+  question: How much did we spend on Materials & Supplies last month?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(amount_paid) FROM transactions
+    WHERE category_name = 'Materials & Supplies'
+      AND transaction_date >= DATE '2026-08-01' AND transaction_date < DATE '2026-09-01'
+
+- id: q013
+  question: How much committed spend was there last month, including pending and retainage?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(amount_total) FROM transactions
+    WHERE transaction_date >= DATE '2026-08-01' AND transaction_date < DATE '2026-09-01'
+
+- id: q014
+  question: How much did we spend on Debt Service in the last 12 months?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(amount_paid) FROM transactions
+    WHERE category_name = 'Debt Service'
+      AND transaction_date >= DATE '2025-09-01' AND transaction_date < DATE '2026-09-01'
+
+# ---------------------------------------------------------------- grouped breakdown
+- id: q015
+  question: Which category did we spend the most on last month?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(amount_paid) FROM transactions
+    WHERE transaction_date >= DATE '2026-08-01' AND transaction_date < DATE '2026-09-01'
+    GROUP BY category_name ORDER BY 1 DESC LIMIT 1
+
+- id: q016
+  question: Who was our single largest vendor last month?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(amount_paid) FROM transactions
+    WHERE transaction_date >= DATE '2026-08-01' AND transaction_date < DATE '2026-09-01'
+    GROUP BY vendor_name ORDER BY 1 DESC LIMIT 1
+
+- id: q017
+  question: Top 5 vendors by spend in the last 12 months
+  grade: numeric
+  compare: rows
+  truth_sql: SELECT 5
+
+- id: q018
+  question: Break down spend by category last month
+  grade: numeric
+  compare: sum
+  truth_sql: >
+    SELECT SUM(amount_paid) FROM transactions
+    WHERE transaction_date >= DATE '2026-08-01' AND transaction_date < DATE '2026-09-01'
+
+- id: q019
+  question: Which department spent the most in the last 12 months?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(amount_paid) FROM transactions
+    WHERE transaction_date >= DATE '2025-09-01' AND transaction_date < DATE '2026-09-01'
+    GROUP BY department_name ORDER BY 1 DESC LIMIT 1
+
+- id: q020
+  question: Spend by fund type last quarter
+  grade: numeric
+  compare: sum
+  truth_sql: >
+    SELECT SUM(amount_paid) FROM transactions
+    WHERE transaction_date >= DATE '2026-04-01' AND transaction_date < DATE '2026-07-01'
+
+# ---------------------------------------------------------------- comparative
+- id: q021
+  question: How does August 2026 compare to July 2026?
+  grade: numeric
+  compare: sum
+  truth_sql: >
+    SELECT SUM(amount_paid) FROM transactions
+    WHERE transaction_date >= DATE '2026-07-01' AND transaction_date < DATE '2026-09-01'
+
+- id: q022
+  question: How does August 2026 compare to the month before?
+  grade: spec
+  expect_spec: {intent: compare, date_basis: payment_date}
+
+- id: q023
+  question: Compare last quarter to the quarter before it
+  grade: spec
+  expect_spec: {intent: compare, date_basis: payment_date}
+
+# ---------------------------------------------------------------- reconciliation
+# Re-graded after the first canary run. "Not reconciled" is the scope ambiguity
+# itself, so asking is correct behaviour and grading it numerically was an error
+# in this file, not in the assistant.
+- id: q024
+  question: What is the total exposure of items that are not reconciled?
+  grade: behaviour
+  expect: must_clarify
+  expect_kind: scope
+
+- id: q025
+  question: How much is sitting in Disputed status?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(ledger_amount) FROM reconciliation WHERE reconciliation_status = 'Disputed'
+
+- id: q026
+  question: How much is Partially Matched?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(ledger_amount) FROM reconciliation WHERE reconciliation_status = 'Partially Matched'
+
+- id: q027
+  question: How many transactions are Disputed?
+  grade: numeric
+  truth_sql: SELECT COUNT(*) FROM reconciliation WHERE reconciliation_status = 'Disputed'
+
+- id: q028
+  question: How much has been reconciled successfully?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(ledger_amount) FROM reconciliation WHERE reconciliation_status = 'Reconciled'
+
+- id: q029
+  question: Show me the reconciliation status breakdown
+  grade: numeric
+  compare: rows
+  truth_sql: SELECT COUNT(DISTINCT reconciliation_status) FROM reconciliation
+
+# ---------------------------------------------------------------- fiscal year
+# Re-graded: "fiscal year 2025" is precisely the temporal fork, so a clarify is
+# the right answer and a number would have been the wrong one.
+- id: q030
+  question: How much was charged to fiscal year 2025?
+  grade: behaviour
+  expect: must_clarify
+  expect_kind: temporal
+
+- id: q031
+  question: How many transactions were booked to fiscal year 2027?
+  grade: numeric
+  truth_sql: SELECT COUNT(*) FROM transactions WHERE fiscal_year = '2027'
+
+# ---------------------------------------------------------------- spec-only (extraction)
+- id: q032
+  question: How much did we spend on vendor payouts last month?
+  grade: spec
+  expect_spec: {metric: amount_paid, date_basis: payment_date, vendor_query: null}
+
+- id: q033
+  question: Top 5 vendors by spend in the last 12 months
+  grade: spec
+  expect_spec: {group_by: [vendor], limit: 5, vendor_query: null}
+
+- id: q034
+  question: How much did we pay McKesson in FY2026?
+  grade: spec
+  expect_spec: {date_basis: fiscal_year, fiscal_year: '2026', period: null}
+
+- id: q035
+  question: Spend by fund type last quarter
+  grade: spec
+  expect_spec: {date_basis: payment_date, group_by: [fund_type], payment_status: []}
+
+- id: q036
+  question: Break down spend by category last month
+  grade: spec
+  expect_spec: {group_by: [category], date_basis: payment_date}
+
+- id: q037
+  question: Show me the 10 largest payments in August 2026
+  grade: spec
+  expect_spec: {intent: list, limit: 10}
+
+- id: q038
+  question: How much do we still owe, including pending and retainage?
+  grade: spec
+  expect_spec: {metric: amount_total}
+
+- id: q039
+  question: Which payouts were unusually large compared to a vendor's history?
+  grade: spec
+  expect_spec: {intent: anomaly}
+
+- id: q040
+  question: How many vendors did we pay last month?
+  grade: spec
+  expect_spec: {metric: vendor_count, date_basis: payment_date}
+
+# ---------------------------------------------------------------- behaviour: must clarify
+- id: q041
+  question: How much did we spend in FY2026?
+  grade: behaviour
+  expect: must_clarify
+  expect_kind: temporal
+  note: >
+    $16.82B by the fiscal_year column vs $18.16B by the Jul-Jun date window -
+    a $1.34B gap. Only 7.4% relative, so this is the case that proves relative
+    spread alone is the wrong materiality test.
+
+- id: q042
+  question: Which transactions are still unreconciled?
+  grade: behaviour
+  expect: must_clarify
+  expect_kind: scope
+  note: strict $3.31B vs broad $4.62B, a 28.5% spread
+
+- id: q043
+  question: How much did we pay the bank of new york?
+  grade: behaviour
+  expect: must_clarify
+  expect_kind: entity
+  note: two near-identical entities of near-identical size; ranking by similarity alone is a coin flip on $1.4B
+
+- id: q044
+  question: How much did we pay McKesson?
+  grade: behaviour
+  expect: must_clarify
+  expect_kind: entity
+  note: three McKesson entities, top holds only 64% of combined spend
+
+- id: q045
+  question: What did we spend in fiscal 2025?
+  grade: behaviour
+  expect: must_clarify
+  expect_kind: temporal
+
+# ---------------------------------------------------------------- behaviour: must refuse
+- id: q046
+  question: How much did we spend in December 2026?
+  grade: behaviour
+  expect: must_refuse_no_data
+  note: outside coverage. Must say "no data", never $0.00 - the two are different answers.
+
+- id: q047
+  question: How much did we spend in 2019?
+  grade: behaviour
+  expect: must_refuse_no_data
+
+- id: q048
+  question: What is our headcount?
+  grade: behaviour
+  expect: must_be_unsupported
+  note: no employee data in this schema
+
+- id: q049
+  question: What is our revenue forecast for next year?
+  grade: behaviour
+  expect: must_be_unsupported
+
+- id: q050
+  question: How many people work in the finance department?
+  grade: behaviour
+  expect: must_be_unsupported
+  note: >
+    "department" appears in the schema but headcount does not - tests that the
+    model refuses on the missing MEASURE rather than matching a familiar noun.

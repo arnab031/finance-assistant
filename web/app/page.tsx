@@ -1,4 +1,5 @@
 import Chat from "@/components/chat/Chat";
+import Logo from "@/components/Logo";
 import { getCoverage } from "@/lib/api";
 
 // Server component: coverage is fetched before first paint so the banner and
@@ -21,15 +22,16 @@ export default async function Page() {
     <main className="shell">
       <header className="header">
         <div className="brand">
-          <span className="brand-mark" />
+          <Logo size={30} />
           <div>
-            <h1 className="brand-title">Finance Assistant</h1>
+            <h1 className="brand-title">Finsight</h1>
             <p className="brand-sub">Grounded answers from your ledger</p>
           </div>
         </div>
         <p className="header-note">
           Computed in SQL · verified before display
         </p>
+        <a className="ops-link" href="/ops">System health →</a>
       </header>
       <Chat coverage={coverage} suggestions={SUGGESTIONS} />
     </main>

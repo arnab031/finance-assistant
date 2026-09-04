@@ -25,6 +25,9 @@ class LLMResult:
     latency_ms: int = 0
     model: str = ""
     raw: str = field(default="", repr=False)
+    # set by extract(); surfaced in query_log so a degrading model is visible
+    repaired: bool = False
+    coerced: bool = False
 
 
 @runtime_checkable

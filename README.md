@@ -1,10 +1,40 @@
-# TBX Hackathon — Stand-in Finance Dataset
+# Finsight
 
-Dataset for **"Build a Finance Assistant That Actually Understands You"** (BVP Tech Catalyst).
+**Grounded answers from your ledger.**
+Team Finsight · TBX / BVP Tech Catalyst — *Build a Finance Assistant That Actually Understands You*
+
+Ask about vendor spend, payouts and reconciliation in plain language. Every figure is
+computed in SQL and verified against the source rows before it is shown — **no number the
+assistant states can originate from the model.**
+
+```bash
+./run.sh          # start everything
+                  # chat  http://localhost:3000
+                  # ops   http://localhost:3000/ops
+./run.sh test     # 49 regression tests
+python -m eval    # 50-question canary against SQL ground truth
+```
+
+| | |
+|---|---|
+| **Architecture** | [architecture.html](architecture.html) — open in a browser |
+| **Strategy** | [PLAN.md](PLAN.md) |
+| **Interfaces** | [FLOW.md](FLOW.md) |
+| **Clarification design** | [AMBIGUITY.md](AMBIGUITY.md) |
+| **Build spec** | [PRD.md](PRD.md) |
+| **Schema** | [data/DATA_DICTIONARY.md](data/DATA_DICTIONARY.md) |
+
+Stack: Next.js 15 · FastAPI · PostgreSQL 18 (pg_trgm, pgvector) · qwen2.5:7b-instruct via Ollama.
+
+Current canary: **41/50 (82%)** — numeric 20/27, behaviour 11/12, spec 10/11, p50 4.7 s.
+
+---
+
+# The dataset
 
 The organizers will ship their own starter dataset before the hackathon. This is a
-shape-compatible stand-in so you can build the retrieval, aggregation, and grounding layers
-now and swap the data in later by changing one loader.
+shape-compatible stand-in, so the retrieval, aggregation and grounding layers are already
+built and the real data drops in through one loader.
 
 ---
 
@@ -128,8 +158,6 @@ containing `.nosync`:
 ```bash
 mkdir -p data/db.nosync && mv data/finance.db data/db.nosync/
 ```
-
----
 
 ---
 

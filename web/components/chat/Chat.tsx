@@ -74,6 +74,10 @@ function reduce(state: Message[], action: Action): Message[] {
         if (m.id !== action.id || m.role !== "assistant") return m;
         const e = action.event;
         switch (e.type) {
+          case "thread":
+            // Server-issued thread id. Adopted by Chat so follow-ups and settled
+            // ambiguity choices stay attached to this conversation.
+            return m;
           case "stage":
             return { ...m, stage: e.stage as Stage };
           case "spec":

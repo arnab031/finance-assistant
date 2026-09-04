@@ -1,4 +1,4 @@
-# Flow Design
+# Finsight — Flow Design
 
 **Review this before I write the PRD.** Decisions needing your sign-off are collected in §9.
 

@@ -1,6 +1,7 @@
-# Build Plan — 36 Hours, 3 People
+# Finsight — Build Plan
 
-TBX / BVP Tech Catalyst — *Build a Finance Assistant That Actually Understands You*
+Team **Finsight** · TBX / BVP Tech Catalyst
+*Build a Finance Assistant That Actually Understands You*
 
 Stack: **Python + FastAPI backend, React frontend, PostgreSQL.**
 Dataset: already built — see [README.md](README.md) and [data/DATA_DICTIONARY.md](data/DATA_DICTIONARY.md).

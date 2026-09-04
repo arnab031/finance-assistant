@@ -2,8 +2,10 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Finance Assistant — TBX",
-  description: "Ask about vendor spend, payouts and reconciliation in plain language.",
+  title: "Finsight",
+  description:
+    "Grounded answers from your ledger. Every figure computed in SQL and "
+    + "verified against the source rows before it is shown.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

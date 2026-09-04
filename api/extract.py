@@ -58,6 +58,11 @@ date_basis
   EVERYTHING ELSE means "payment_date". Set period {{start, end}} from the
   resolved windows above.
 
+  IF THE QUESTION MENTIONS NO TIME AT ALL, OMIT period ENTIRELY. Do not default
+  to this year or any other window. "How much is still pending?" and "What was
+  our total spend?" cover ALL the data; adding a period silently answers a
+  narrower question than the one asked.
+
   "quarter", "last quarter", "this quarter", "Q1".."Q4", "month", "last month",
   "week" are NOT fiscal phrasings. A fiscal_year holds a whole year and CANNOT
   express a quarter or a month, so choosing it for those questions is always
@@ -256,6 +261,48 @@ def _correct_subyear_basis(spec: QuerySpec, question: str) -> QuerySpec:
     ])
 
 
+# Any token that gives a question a time bound. Absence of ALL of these means
+# the question is unbounded and a period must not be invented.
+# "FY2026" is one token, so \bfy\b and \b(?:19|20)\d{2}\b both miss it - there
+# is no word boundary between the letters and the digits. The year alternative
+# uses digit lookarounds instead, and fy is matched with its number attached.
+_TEMPORAL_RE = re.compile(
+    r"(?<!\d)(?:19|20)\d{2}(?!\d)"
+    r"|\bfy\s*\d{2,4}\b"
+    r"|\b(last|past|previous|this|current|recent|since|between|before|after|"
+    r"during|ytd|year to date|today|yesterday|now|"
+    r"year|quarter|month|week|day|q[1-4]|fy|fiscal|financial)\b"
+    r"|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b",
+    re.I,
+)
+
+
+def _strip_invented_period(spec: QuerySpec, question: str) -> QuerySpec:
+    """Remove a date window the question never asked for.
+
+    Measured on the golden set: asked "What was our total spend across all the
+    data?", the model returned period "2026 to date" - $18.4B instead of
+    $34.3B. Same for "How much is still pending?" and every unbounded
+    reconciliation question. Five of twelve canary failures were this one bug.
+
+    An invented narrowing is worse than an invented widening: the number looks
+    plausible, so nothing about the answer signals that a filter was applied.
+    """
+    if spec.period is None or _TEMPORAL_RE.search(question):
+        return spec
+
+    log.info("dropped invented period %r (question has no time reference)",
+             spec.period.label)
+    return spec.patched(
+        period=None,
+        compare_period=None,
+        ambiguities=[
+            *spec.ambiguities,
+            "No period was requested, so the answer covers all available data.",
+        ],
+    )
+
+
 def _strip_unasked_status_filters(spec: QuerySpec, question: str) -> QuerySpec:
     """Drop status filters the question never asked for.
 
@@ -283,6 +330,7 @@ def _strip_unasked_status_filters(spec: QuerySpec, question: str) -> QuerySpec:
 
 def sanity_pass(spec: QuerySpec, question: str) -> QuerySpec:
     spec = _correct_subyear_basis(spec, question)
+    spec = _strip_invented_period(spec, question)
     return _strip_unasked_status_filters(spec, question)
 
 
@@ -302,11 +350,17 @@ async def extract(
     try:
         return sanity_pass(QuerySpec.model_validate(result.data), question), result
     except ValidationError as first_error:
-        log.info("spec invalid, repairing: %s", _brief(first_error))
+        # Python deletes the `as` variable when the except block exits, so the
+        # message has to be captured HERE. Referring to `first_error` below
+        # raised UnboundLocalError - a crash that only reached users on the
+        # repair path, which is why 49 passing tests never touched it. The
+        # incident view caught it on the first real canary run.
+        first_message = _brief(first_error)
+        log.info("spec invalid, repairing: %s", first_message)
 
     repair_user = (
         f"{user}{json.dumps(result.data, separators=(',', ':'))}\n\n"
-        f"That was rejected: {_brief(first_error)}\n"
+        f"That was rejected: {first_message}\n"
         "Return a corrected object. Remember: with date_basis 'fiscal_year' set "
         "fiscal_year and omit period; with 'payment_date' set period and omit "
         "fiscal_year."
@@ -315,6 +369,7 @@ async def extract(
     retry.input_tokens += result.input_tokens
     retry.output_tokens += result.output_tokens
     retry.latency_ms += result.latency_ms
+    retry.repaired = True
 
     try:
         return sanity_pass(QuerySpec.model_validate(retry.data), question), retry
@@ -332,6 +387,7 @@ async def extract(
                 raw=retry.raw,
             ) from second_error
 
+        retry.coerced = True
         log.warning("spec coerced after two strict failures: %s", _brief(second_error))
         return sanity_pass(spec, question), retry
 

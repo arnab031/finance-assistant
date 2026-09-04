@@ -291,6 +291,15 @@ class StageEvent(BaseModel):
     stage: Stage
 
 
+class ThreadEvent(BaseModel):
+    """First frame of every response. A client that sent no thread_id gets the
+    server-generated one here and should send it back on the next question -
+    without it, settled ambiguity choices cannot be loaded."""
+
+    type: Literal["thread"] = "thread"
+    thread_id: str
+
+
 class SpecEvent(BaseModel):
     type: Literal["spec"] = "spec"
     spec: QuerySpec
@@ -362,7 +371,7 @@ class ErrorEvent(BaseModel):
 
 
 Event = Annotated[
-    StageEvent | SpecEvent | ClarifyEvent | SqlEvent | RowsEvent
+    ThreadEvent | StageEvent | SpecEvent | ClarifyEvent | SqlEvent | RowsEvent
     | TokenEvent | VerifiedEvent | NoteEvent | DoneEvent | ErrorEvent,
     Field(discriminator="type"),
 ]
