@@ -334,7 +334,12 @@ def template_answer(
     if "value" in columns:
         idx = columns.index("value")
         first = rows[0][idx]
-        if len(rows) == 1:
+        if first is None:
+            # SUM over nothing is one row of NULL, and _fmt_money(None) is "",
+            # which made this deterministic fallback say "The result is ." -
+            # the one path that is supposed to be correct by construction.
+            body = "Nothing matched those filters, so there is no total to report."
+        elif len(rows) == 1:
             body = f"The result is {_fmt_money(first)}."
         else:
             label = _fmt_cell(rows[0][0])

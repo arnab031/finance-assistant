@@ -147,6 +147,13 @@ class QuerySpec(BaseModel):
     compare_fiscal_year: str | None = None
 
     sort_desc: bool = True
+    # How a grouped result is ordered when the axis is TIME. Trends read
+    # chronologically whatever sort_desc says - that is deliberate, or "break
+    # down by month" would come back newest-first. But "which month had the
+    # highest spend?" is a ranking, and chronological order answered it with the
+    # first month rather than the largest. Set only by the extraction
+    # correctors, never offered to the model; None keeps the trend behaviour.
+    order: Literal["chronological", "value"] | None = None
     limit: Annotated[int, Field(ge=1, le=200)] = 20
 
     # Populated by the extractor, surfaced in the provenance panel.
@@ -276,7 +283,12 @@ def _filter_schema(filt: "Filt") -> dict[str, Any]:
         return {"type": "string", "description": filt.hint}
     if filt.kind == "number":
         return {"type": "number", "description": filt.hint}
-    return {"type": "array", "items": {"type": "string"}, "description": filt.hint}
+    out = {"type": "array", "items": {"type": "string"}, "description": filt.hint}
+    if filt.max_items:
+        # Declared to the decoder; enforced again in api/extract.py because
+        # llama.cpp's grammar conversion does not reliably honour maxItems.
+        out["maxItems"] = filt.max_items
+    return out
 
 
 def extraction_schema() -> dict[str, Any]:

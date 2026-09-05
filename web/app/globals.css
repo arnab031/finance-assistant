@@ -153,7 +153,13 @@ body {
 }
 .answer-text { margin: 0 0 10px; white-space: pre-wrap; }
 .answer-error { margin: 0; color: var(--warn); }
-.answer-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+/* align-items:center, not the default stretch: the timing span has no padding
+   of its own, so stretched to the badge's height its text renders at the top of
+   the box and sits visibly above the badge label beside it. */
+.answer-meta {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: 8px; margin-bottom: 10px;
+}
 
 /* ---------- notes + badges ---------- */
 

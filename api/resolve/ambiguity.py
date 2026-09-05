@@ -153,7 +153,9 @@ class Ambiguity:
 
 
 def _money_gap(a: Ambiguity) -> str:
-    vals = [abs(i.value) for i in a.interpretations if i.value is not None]
+    # Signed, like _values(): abs() here reported "a ₹0 difference" in the very
+    # disclosure that exists because net -71,156 and gross +71,156 differ.
+    vals = [i.value for i in a.interpretations if i.value is not None]
     if len(vals) < 2:
         return "different amounts"
     return fmt_inr(max(vals) - min(vals), places=0)

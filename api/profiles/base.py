@@ -43,6 +43,10 @@ class Filt:
     # debit - min_amount was compilable but undeclared.
     kind: str = "list"
     hint: str = ""
+    # Declared to the constrained decoder as maxItems AND enforced again in
+    # api/extract.py: llama.cpp's schema-to-grammar does not reliably honour
+    # maxItems, so the grammar is the polite request and the corrector the rule.
+    max_items: int | None = None
 
 
 @dataclass(frozen=True)
@@ -104,7 +108,9 @@ class Profile:
     filters: dict[str, Filt]
     joins: dict[str, str]
     list_columns: list[str]                # columns for intent="list"
-    time_dimensions: frozenset[str] = frozenset({"month", "quarter"})
+    # "day" included: a per-day breakdown is a trend and reads chronologically,
+    # like month and quarter. Without it "on each day" came back sorted by value.
+    time_dimensions: frozenset[str] = frozenset({"month", "quarter", "day"})
 
     # ---- registry: how to learn what is in the data ----
     coverage_sql: str = ""

@@ -73,7 +73,10 @@ async def models():
     offered = [m for m in declared if m in available]
     missing = [m for m in declared if m not in available]
     if not offered:
-        offered = available or [settings.ollama_model]
+        # Never "everything pulled": _llm_for honours only eval_model_names, so
+        # offering more would put models in the picker that /api/ask silently
+        # ignores. One declared list, both endpoints.
+        offered = [settings.ollama_model]
     return {"models": offered, "default": settings.ollama_model,
             "missing": missing}
 
@@ -132,7 +135,7 @@ async def eval_run(request: Request) -> StreamingResponse:
                 from api.llm.base import get_llm
 
                 settings.llm_provider = provider
-                if model_name:
+                if model_name and provider == "ollama":
                     settings.ollama_model = model_name
                 try:
                     swapped_llm = get_llm()

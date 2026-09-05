@@ -184,14 +184,17 @@ def _joins_for(group_by: list[str], extra: set[str], prof: Profile) -> list[str]
 
 
 def _order_by(group_by: list[str], sort_desc: bool, aliases: list[str],
-              prof: Profile) -> str:
+              prof: Profile, order: str | None = None) -> str:
     """Takes the EFFECTIVE grouping, not spec.group_by - `reconcile` may add a
     dimension the spec never declared, and reading it off the spec desyncs."""
     if not aliases or not group_by:
         return ""
     if group_by[0] in prof.time_dimensions:
-        # Trends read chronologically regardless of sort_desc.
-        return f"ORDER BY {aliases[0]} ASC"
+        # Trends read chronologically regardless of sort_desc - unless the spec
+        # says this is a RANKING ("which month had the most"), set only by the
+        # extraction correctors. A ranking wants value order like any other axis.
+        if order != "value":
+            return f"ORDER BY {aliases[0]} ASC"
     # MySQL has no NULLS LAST, and its default differs by direction: nulls sort
     # first ascending, last descending. `col IS NULL` yields 0/1, so ordering by
     # it first puts non-nulls ahead in BOTH directions - the Postgres behaviour
@@ -255,7 +258,7 @@ def _compile_aggregate(spec: QuerySpec, reg: SemanticRegistry,
         sql.append("WHERE " + "\n  AND ".join(clauses))
     if aliases:
         sql.append("GROUP BY " + ", ".join(str(i + 1) for i in range(len(aliases))))
-        order = _order_by(group_by, spec.sort_desc, aliases, prof)
+        order = _order_by(group_by, spec.sort_desc, aliases, prof, spec.order)
         if order:
             sql.append(order)
         sql.append("LIMIT %(limit)s")
@@ -271,9 +274,11 @@ def _compile_list(spec: QuerySpec, reg: SemanticRegistry,
     clauses, params, join_hint = _where(spec, reg, prof)
     joins = _joins_for(list(spec.group_by), join_hint, prof)
 
-    # account_number is selectable now: the column holds ciphertext, and
-    # placeholderise() decrypts it into a placeholder before anything sees it.
-    # Blocking the column here would break the feature it was meant to protect.
+    # account_number is selectable. The column is PLAINTEXT at rest (see
+    # api/crypto.py and 001_schema.sql); placeholderise() ENCRYPTS it into a
+    # token on the way to the model, and resolve_rows() hands the user the real
+    # value. An earlier version of this comment said the reverse and would have
+    # led anyone filtering on the column to bind ciphertext and match nothing.
     cols = list(prof.list_columns)
     if "recon" in joins:
         cols += ["r.reconciliation_status", "r.days_outstanding", "r.exception_reason"]
