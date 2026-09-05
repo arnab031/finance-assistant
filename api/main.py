@@ -104,6 +104,12 @@ THRESHOLDS = {
     "sanity_correction_rate":  ("<=", 0.15),   # model ignoring the prompt
     "clarify_rate":            ("<=", 0.35),   # above this it is nagging
     "empty_result_rate":       ("<=", 0.10),   # filters resolving to nothing
+    # Confidence as the pipeline already labels it - over ANSWERED requests, so
+    # refusals do not dilute it. medium_confidence_rate is deliberately absent:
+    # it is the residual of the other two, and a threshold on it would fire
+    # twice for the same underlying slip.
+    "high_confidence_rate":    (">=", 0.85),   # most answers on the clean path
+    "low_confidence_rate":     ("<=", 0.10),   # figures that could not be traced
     "error_rate":              ("<=", 0.02),
     "p95_ms":                  ("<=", 20000),
 }

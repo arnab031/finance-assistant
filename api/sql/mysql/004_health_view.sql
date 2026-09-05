@@ -25,6 +25,20 @@ answered AS (
 ),
 lat AS (
     SELECT total_ms, CUME_DIST() OVER (ORDER BY total_ms) AS cd FROM answered
+),
+-- The confidence label the pipeline already assigns per request. It lives on
+-- chat_messages, not query_log, so reaching it is a join.
+--
+-- Joined to `answered`, not `windowed`, on purpose. 173 of the high-confidence
+-- rows on this database never ran SQL at all - they are unsupported declines
+-- and coverage refusals, which are correct behaviour rather than confident
+-- answers. Averaging them in would inflate the metric with non-answers, which
+-- is exactly the mistake empty_result_rate made on its first run.
+conf AS (
+    SELECT m.confidence
+    FROM chat_messages m
+    JOIN answered a ON a.id = m.query_log_id
+    WHERE m.role = 'assistant'
 )
 SELECT
     (SELECT COUNT(*) FROM windowed) AS requests,
@@ -53,6 +67,14 @@ SELECT
     (SELECT ROUND(AVG(row_count = 0), 4)
        FROM windowed WHERE error IS NULL AND sql_text IS NOT NULL)
                                                               AS empty_result_rate,
+
+    -- how sure the pipeline was, per answer. Reported as rates per label rather
+    -- than an average: the labels are ordinal, not numeric, and inventing a
+    -- high=1.0/medium=0.5/low=0.0 mapping would put made-up arithmetic behind a
+    -- number people read as measured.
+    (SELECT ROUND(AVG(confidence = 'high'), 4)   FROM conf) AS high_confidence_rate,
+    (SELECT ROUND(AVG(confidence = 'medium'), 4) FROM conf) AS medium_confidence_rate,
+    (SELECT ROUND(AVG(confidence = 'low'), 4)    FROM conf) AS low_confidence_rate,
 
     -- reliability and cost
     (SELECT ROUND(AVG(error IS NOT NULL), 4) FROM windowed)   AS error_rate,

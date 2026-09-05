@@ -7,6 +7,16 @@ import ClarifyCard from "./ClarifyCard";
 import ProvenancePanel from "./ProvenancePanel";
 import VerifiedBadge from "./VerifiedBadge";
 
+// The label is set by the pipeline from what it measured, not by the model.
+// Saying which measurement keeps "medium" from reading as an unexplained shrug.
+const CONFIDENCE_HINT: Record<string, string> = {
+  high: "Every figure was traced back to a row in the query result.",
+  medium: "Figures check out, but the answer fell back to a generated summary "
+        + "rather than the model's own wording.",
+  low: "Some figures could not be traced to the query result, so the answer was "
+     + "rebuilt directly from the data.",
+};
+
 export default function AnswerCard({
   msg, onChoose, busy,
 }: {

@@ -1,3 +1,11 @@
+# Everything the default configuration needs: `pip install -r requirements.txt`
+# is enough to run the API, the web backend and the eval harness. Verified by
+# installing into an empty venv and importing every module.
+#
+# Pins cover the whole tree, transitive packages included, so a fresh install
+# resolves to the versions this was measured on. Two optional providers are
+# deliberately absent - see the note at the bottom before adding them.
+
 agent-detector==2.0.0
 annotated-doc==0.0.5
 annotated-types==0.8.0
@@ -25,6 +33,14 @@ mdurl==0.1.2
 # PyMySQL maps DECIMAL -> decimal.Decimal so money stays exact.
 aiomysql==0.3.2
 PyMySQL==1.2.0
+# Sensitive fields (api/crypto.py). AES-256-SIV (RFC 5297) is the reason for
+# this dependency specifically: it is DETERMINISTIC, so an encrypted
+# account_number still answers WHERE account_number = encrypt(value), which a
+# randomized cipher cannot. cffi and pycparser are cryptography's own
+# dependencies, pinned here because this file pins the whole tree.
+cryptography==50.0.1
+cffi==2.1.1
+pycparser==3.0
 pydantic==2.13.5
 pydantic-extra-types==2.11.1
 pydantic-settings==2.15.0
@@ -47,3 +63,20 @@ uvicorn==0.52.4
 uvloop==0.22.1
 watchfiles==1.2.0
 websockets==17.1
+
+# ---------------------------------------------------------------------------
+# DELIBERATELY NOT PINNED
+#
+# sentence-transformers   EMBED_PROVIDER=sbert only. Left out because it pulls
+#                         torch, ~2 GB, on every install - for a provider that
+#                         exists as a comparison rather than as the default.
+#                         api/embed/sbert.py guards the import and says how to
+#                         install it, so choosing sbert without it gives an
+#                         instruction, not a traceback.
+#
+# anthropic               LLM_PROVIDER=anthropic. NOT a packaging gap: the
+#                         provider module api/llm/anthropic.py does not exist
+#                         yet, so the switch fails on the import of OUR module
+#                         before any SDK is reached. Pinning the SDK would only
+#                         disguise that. Write the module first, then pin it.
+# ---------------------------------------------------------------------------

@@ -365,11 +365,29 @@ PROFILE = Profile(
 
     prompt_rules=PROMPT_RULES,
     fewshot=FEWSHOT,
+    # The catch-all, shown only when nothing in ABSENT_CONCEPTS matched. It says
+    # what the data IS and leaves each "we do not have X" to the entry that knows
+    # which X was asked for - a reader who wanted a sales pipeline is not helped
+    # by a list of six other things this schema also lacks. Two things the
+    # previous wording got wrong, both visible by asking the running app:
+    #
+    # "There is no vendor master" contradicted the counterparty work. The payee
+    # name IS available - extracted from the narration text (api/narration.py) -
+    # and "Who did we pay the most?" is one of the suggestion chips above. A
+    # decline that denies payee questions steers users off a question this data
+    # answers well, which is worse than saying nothing.
+    #
+    # A MASKED FIELD IS NOT A MISSING ONE. Asked for a full account number, this
+    # note used to reply that there was no vendor master, no expense categories
+    # and no budget data: all true, none of it the reason. account_number and
+    # utr_number are present and deliberately withheld, and the refusal should
+    # say which of the two it is rather than imply the data is thin.
     unsupported_note=(
         "That isn't answerable from this data. It holds bank statement lines — "
-        "banks, accounts, and credit/debit transactions. There is no vendor "
-        "master, no expense categories, no reconciliation status, and no "
-        "budget or employee data."
+        "date, amount, credit or debit, bank, account, entity, program, and the "
+        "counterparty name read out of the narration text — so spending, income, "
+        "net movement and who was paid are all fair questions. Account and UTR "
+        "numbers do exist, but only in masked form."
     ),
     # No reconciliation table exists, so the intent cannot be compiled.
     disabled_intents=frozenset({"reconcile"}),
