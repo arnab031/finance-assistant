@@ -22,10 +22,13 @@ from pydantic import BaseModel
 
 from api.compile import CompileError, compile_query
 from api.config import settings
+from api.crypto import assert_no_plaintext, placeholderise, resolve_rows
 from api.db import db
 from api.extract import ExtractionFailed, extract
+from api.llm.ollama import ModelUnavailable
 from api.narrate import narrate, template_answer
 from api.observability import RequestTrace, jsonable, new_thread_id
+from api.profiles.base import get_profile
 from api.resolve.ambiguity import AmbiguityResolver
 from api.schema import (
     AskRequest,
@@ -99,10 +102,17 @@ async def _pipeline(body: AskRequest, request: Request) -> AsyncIterator[str]:
         yield frame(StageEvent(stage="checking"))
 
         if spec.intent == "unsupported":
-            text = ("That isn't answerable from this data. It holds vendor "
-                    "payments, reconciliation status, chart of accounts, "
-                    "vendors, departments and funds — no employee, payroll, "
-                    "budget or forecast data.")
+            # Read from the ACTIVE PROFILE. This was hardcoded to the
+            # vendor_payments wording, so every decline on the bank dataset told
+            # the user it holds "vendor payments, chart of accounts, departments
+            # and funds" - a description of a different database entirely. The
+            # canary never caught it because it grades the intent, not the text.
+            prof = get_profile()
+            # When the absent-concept guard fired it knows WHICH domain is
+            # missing, which is more useful than the generic list.
+            specific = {reason for _, reason in prof.absent_concepts}
+            text = (spec.reasoning if spec.reasoning in specific
+                    else prof.unsupported_note)
             trace.note(text)
             yield frame(NoteEvent(kind="coverage", text=text))
             yield frame(DoneEvent(message_id=trace.message_id, confidence="high"))
@@ -153,6 +163,11 @@ async def _pipeline(body: AskRequest, request: Request) -> AsyncIterator[str]:
         yield frame(ErrorEvent(code="extraction_failed",
                                message="I couldn't turn that into a query I can run. "
                                        "Try rephrasing?"))
+    except ModelUnavailable as exc:
+        trace.error = str(exc)
+        log.error("%s", exc)
+        yield frame(ErrorEvent(code="model_unavailable", message=str(exc),
+                               recoverable=False))
     except CompileError as exc:
         trace.error = str(exc)
         log.warning("compile failed: %s", exc)
@@ -243,14 +258,22 @@ async def _execute(spec, reg, trace: RequestTrace, llm, question: str) -> AsyncI
     trace.sql = cq.sql
     yield frame(SqlEvent(sql=cq.sql, params=jsonable(cq.params)))
 
-    columns, rows, sql_ms = await db.fetch_timed(cq.sql, cq.params)
+    columns, raw_rows, sql_ms = await db.fetch_timed(cq.sql, cq.params)
+
+    # Decrypt, then immediately swap the plaintext for a placeholder. Everything
+    # downstream - the model, the trace, the stored message - works in
+    # placeholder space; real values are substituted only at the final render.
+    rows, pmap = placeholderise(columns, raw_rows)
+
+    # The trace is persisted, so it must hold placeholders, not plaintext.
     trace.columns, trace.rows_sample = columns, jsonable(rows[:20])
     trace.row_count, trace.sql_ms = len(rows), sql_ms
 
+    # The USER may see real values; this is their own data.
     yield frame(RowsEvent(
         result_id=f"res_{uuid.uuid4().hex[:12]}",
         columns=columns,
-        rows=jsonable(rows[: settings.max_rows_to_client]),
+        rows=jsonable(resolve_rows(columns, rows, pmap)[: settings.max_rows_to_client]),
         row_count=len(rows),
         elapsed_ms=sql_ms,
         truncated=len(rows) > settings.max_rows_to_client,
@@ -258,17 +281,22 @@ async def _execute(spec, reg, trace: RequestTrace, llm, question: str) -> AsyncI
 
     # ---- narrate + verify ------------------------------------------------
     yield frame(StageEvent(stage="explaining"))
+    # The MODEL may not. Asserted rather than assumed: a mask that silently
+    # stops working looks entirely normal until someone reads the output.
+    assert_no_plaintext(rows, pmap, "the narration prompt")
     text, verdict, narrate_ms = await narrate(
-        question, spec, columns, rows, llm, trace.notes)
+        question, spec, columns, rows, llm, trace.notes, pmap=pmap)
 
-    trace.narration = text
+    trace.narration = text          # placeholder form; never persist plaintext
     trace.narrate_ms = narrate_ms
     trace.verified = verdict.ok
     trace.unverified = verdict.unverified
     trace.template_used = text == template_answer(question, columns, rows)
 
-    for i in range(0, len(text), 24):
-        yield frame(TokenEvent(text=text[i:i + 24]))
+    # Final render: substitute real values, AFTER verification has run.
+    display = pmap.resolve(text) if pmap else text
+    for i in range(0, len(display), 24):
+        yield frame(TokenEvent(text=display[i:i + 24]))
 
     yield frame(VerifiedEvent(ok=verdict.ok,
                               numbers_checked=verdict.numbers_checked,
@@ -292,9 +320,9 @@ async def _settle(thread_id: str, kind: str, trigger: str, key: str) -> None:
     try:
         await db.execute(
             """INSERT INTO chat_threads (thread_id, settled)
-               VALUES (%(t)s, %(s)s::jsonb)
-               ON CONFLICT (thread_id) DO UPDATE
-               SET settled = chat_threads.settled || EXCLUDED.settled""",
+               VALUES (%(t)s, CAST(%(s)s AS JSON))
+               ON DUPLICATE KEY UPDATE
+                   settled = JSON_MERGE_PATCH(settled, CAST(%(s)s AS JSON))""",
             {"t": thread_id, "s": json.dumps({f"{kind}:{trigger}": key})},
         )
     except Exception:  # noqa: BLE001

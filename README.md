@@ -23,10 +23,19 @@ python -m eval    # 50-question canary against SQL ground truth
 | **Clarification design** | [AMBIGUITY.md](AMBIGUITY.md) |
 | **Build spec** | [PRD.md](PRD.md) |
 | **Schema** | [data/DATA_DICTIONARY.md](data/DATA_DICTIONARY.md) |
+| **MySQL port** | [MYSQL_PORT.md](MYSQL_PORT.md) |
 
-Stack: Next.js 15 · FastAPI · PostgreSQL 18 (pg_trgm, pgvector) · qwen2.5:7b-instruct via Ollama.
+Stack: Next.js 15 · FastAPI · MySQL 8.4 (Docker) · qwen2.5:7b-instruct via Ollama.
 
-Current canary: **41/50 (82%)** — numeric 20/27, behaviour 11/12, spec 10/11, p50 4.7 s.
+Current canary: **40/40 (100%)** on the organizers' schema, plus 69 unit tests
+(30 compiler, 18 narration, 12 extraction, 9 semantic).
+
+> **On the PostgreSQL and SQLite sections below.** They describe building the
+> *stand-in* dataset, which predates the organizers' schema. It was PostgreSQL-only,
+> was never ported, and its code has been removed — see
+> [MYSQL_PORT.md](MYSQL_PORT.md). Those sections are kept as a record of how the
+> 1M-row stand-in was built and validated; they no longer describe anything you
+> can run.
 
 ---
 

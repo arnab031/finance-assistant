@@ -28,14 +28,27 @@ import yaml
 
 from api.db import Database
 
-QUESTIONS_PATH = pathlib.Path(__file__).parent / "questions.yaml"
+EVAL_DIR = pathlib.Path(__file__).parent
+
+
+def questions_path() -> pathlib.Path:
+    """questions.<profile>.yaml if it exists, else the default set.
+
+    The two datasets ask genuinely different questions - one has vendors and
+    reconciliation, the other has credits and debits - so a shared file would be
+    mostly inapplicable to whichever profile is active.
+    """
+    from api.profiles.base import get_profile
+
+    specific = EVAL_DIR / f"questions.{get_profile().name}.yaml"
+    return specific if specific.exists() else EVAL_DIR / "questions.yaml"
 
 # A cent. Money is NUMERIC end to end, so anything looser would hide a real bug.
 TOLERANCE = Decimal("0.01")
 
 
 def load_questions(only: list[str] | None = None) -> list[dict]:
-    qs = yaml.safe_load(QUESTIONS_PATH.read_text())
+    qs = yaml.safe_load(questions_path().read_text())
     return [q for q in qs if not only or q["id"] in only]
 
 
@@ -227,6 +240,32 @@ async def grade(q: dict, a: Answer, db: Database) -> Result:
 # ---------------------------------------------------------------- runner
 
 
+async def preflight(api: str, model: str) -> str | None:
+    """Return a reason the run cannot proceed, or None.
+
+    A canary against a model that was never pulled fails all 50 questions in
+    about two seconds and records a 0% row. That row is worse than no row: read
+    off the scorecard it says the model performs terribly, when in fact it was
+    never called. Refusing to start keeps the bake-off table honest.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            health = (await c.get(f"{api}/api/health")).json()
+    except Exception as exc:  # noqa: BLE001
+        return f"backend unreachable at {api}: {exc}"
+
+    ollama = health.get("checks", {}).get("ollama", {})
+    if not ollama.get("ok", True):
+        installed = ", ".join(ollama.get("models", [])) or "none"
+        want = ollama.get("want", model)
+        return (f"model {want!r} is not installed (have: {installed}). "
+                f"Run: ollama pull {want}")
+
+    if not health.get("checks", {}).get("database", {}).get("ok"):
+        return "database is not reachable"
+    return None
+
+
 async def run_eval(
     db: Database, api: str, model: str, only: list[str] | None = None,
     notes: str = "",
@@ -236,6 +275,11 @@ async def run_eval(
     Streamed so the UI can tick through - 50 questions is several minutes and a
     spinner tells you nothing about which half is failing.
     """
+    blocked = await preflight(api, model)
+    if blocked:
+        yield "error", {"message": blocked}
+        return
+
     questions = load_questions(only)
     run_id = f"ev_{uuid.uuid4().hex[:10]}"
     t0 = time.perf_counter()
@@ -263,7 +307,7 @@ async def run_eval(
                        passed, expected, actual, detail, spec, latency_ms)
                    VALUES (%(r)s, %(q)s, %(qt)s, %(g)s, %(p)s, %(e)s, %(a)s,
                            %(d)s, %(s)s, %(ms)s)
-                   ON CONFLICT (run_id, question_id) DO NOTHING""",
+                   ON DUPLICATE KEY UPDATE run_id = run_id""",
                 {"r": run_id, "q": result.question_id, "qt": result.question,
                  "g": result.grade, "p": result.passed, "e": result.expected,
                  "a": result.actual, "d": result.detail,

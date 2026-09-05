@@ -24,7 +24,9 @@ from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Any, Sequence
 
 from api.config import settings
+from api.crypto import PlaceholderMap
 from api.llm.base import LLM
+from api.money import fmt_inr
 from api.schema import QuerySpec
 
 log = logging.getLogger("tbx.narrate")
@@ -43,12 +45,19 @@ STYLE
 - Write FLOWING PROSE. Never use a numbered or bulleted list. A full breakdown
   table is already on screen beside your answer, so re-listing rows duplicates it.
   Name at most the single largest item, then stop.
-- Money as $1,234,567.89. Round only by dropping decimals, never by inventing digits.
+- Money is RUPEES. Write it as ₹1,23,456.78 - the ₹ symbol and Indian digit
+  grouping. Never write $ or "dollars". Round only by dropping decimals, never
+  by inventing digits.
 - If an assumption is listed, state it plainly in your own words.
-- If there are no rows, say the query returned nothing - do not guess a reason."""
+- If there are no rows, say the query returned nothing - do not guess a reason.
+- Account numbers appear as long opaque strings. Copy one EXACTLY if you mention
+  it, character for character. Never invent one and never write digits in its
+  place - it is a reference, not a number."""
 
-# A number, optionally $-prefixed, comma-grouped, decimal, percentage.
-_NUM_RE = re.compile(r"-?\$?\s?\d[\d,]*(?:\.\d+)?%?")
+# A number, optionally currency-prefixed, comma-grouped, decimal, percentage.
+# Both symbols stay in the class: the ledger is in ₹, but a model that slips
+# and writes $ must still have its digits verified rather than skipped.
+_NUM_RE = re.compile(r"-?[\$\u20b9]?\s?\d[\d,]*(?:\.\d+)?%?")
 _SCALE_RE = re.compile(
     r"\s*(billion|bn|million|mn|thousand|k)\b", re.I)
 _SCALES = {"billion": Decimal(10) ** 9, "bn": Decimal(10) ** 9,
@@ -64,7 +73,14 @@ class Verification:
 
 
 def _canon(token: str) -> str:
-    return token.replace("$", "").replace(",", "").replace("%", "").replace(" ", "").strip()
+    """Strip presentation - symbol, grouping, percent - down to the digits.
+
+    Indian grouping falls out for free: "1,69,299.00" and "169,299.00" both
+    canonicalise to "169299.00", so the checker is indifferent to which
+    convention the model used and only ever compares values."""
+    for ch in ("₹", "$", ",", "%", " "):
+        token = token.replace(ch, "")
+    return token.strip()
 
 
 def _to_decimal(token: str) -> Decimal | None:
@@ -256,10 +272,38 @@ def _drop_orphan_marker(text: str) -> str:
         text = stripped
 
 
+def _check_placeholders(
+    text: str, verdict: Verification, pmap: PlaceholderMap | None
+) -> Verification:
+    """An account placeholder the model invented is the same class of failure as
+    an invented number: a reference to something that was never in the data.
+
+    Without this, an unrecognised [[ACCT_Q]] would survive substitution and sit
+    in the answer as literal text.
+    """
+    if pmap is None:
+        return verdict
+    unknown = pmap.unknown_in(text)
+    if not unknown:
+        return verdict
+    return Verification(ok=False,
+                        numbers_checked=verdict.numbers_checked,
+                        unverified=[*verdict.unverified, *unknown])
+
+
 def _fmt_cell(v: Any) -> str:
     if isinstance(v, Decimal):
         return f"{v:,.2f}"
     return "" if v is None else str(v)
+
+
+def _fmt_money(v: Any) -> str:
+    """Same value as _fmt_cell, but marked as rupees.
+
+    Only the template fallback uses this. The prompt rows deliberately stay
+    bare in _fmt_cell: they are data for the model to read, and a symbol on
+    every cell is one more token it could copy into the wrong sentence."""
+    return fmt_inr(v) if isinstance(v, Decimal) else _fmt_cell(v)
 
 
 def build_user_prompt(
@@ -291,11 +335,11 @@ def template_answer(
         idx = columns.index("value")
         first = rows[0][idx]
         if len(rows) == 1:
-            body = f"The result is {_fmt_cell(first)}."
+            body = f"The result is {_fmt_money(first)}."
         else:
             label = _fmt_cell(rows[0][0])
             body = (f"{len(rows)} rows. The largest is {label} at "
-                    f"{_fmt_cell(first)}.")
+                    f"{_fmt_money(first)}.")
     else:
         body = f"The query returned {len(rows)} rows."
     return f"{body} The breakdown below is the source data."
@@ -308,6 +352,7 @@ async def narrate(
     rows: Sequence[Sequence[Any]],
     llm: LLM,
     notes: Sequence[str] = (),
+    pmap: PlaceholderMap | None = None,
 ) -> tuple[str, Verification, int]:
     """Generate, verify, retry once, else fall back to a template.
 
@@ -316,6 +361,10 @@ async def narrate(
     import time
 
     t0 = time.perf_counter()
+    # Defence in depth. The views already serve masked forms, the compiler
+    # refuses to select sensitive columns, and this asserts on the rows that
+    # actually reach the model. A silent mask that stops working looks entirely
+    # normal until someone reads the output - so it fails loudly instead.
     user = build_user_prompt(question, columns, rows, notes)
     extra = [len(rows), spec.limit]
 
@@ -330,7 +379,11 @@ async def narrate(
         spec.fiscal_year or "",
         *notes,                     # the prompt asks the model to restate these
     ])
-    verdict = verify_numbers(text, columns, rows, extra, context)
+    # Strip issued tokens first: ciphertext is base64 and contains digits, which
+    # the numeric check would otherwise read as figures the model invented.
+    verdict = verify_numbers(pmap.strip(text) if pmap else text,
+                             columns, rows, extra, context)
+    verdict = _check_placeholders(text, verdict, pmap)
     if verdict.ok:
         return text, verdict, int((time.perf_counter() - t0) * 1000)
 
@@ -346,7 +399,11 @@ async def narrate(
         retry += chunk
     retry = _trim_incomplete(retry)
 
-    retry_verdict = verify_numbers(retry, columns, rows, extra, context)
+    retry_verdict = _check_placeholders(
+        retry,
+        verify_numbers(pmap.strip(retry) if pmap else retry,
+                       columns, rows, extra, context),
+        pmap)
     if retry_verdict.ok:
         return retry, retry_verdict, int((time.perf_counter() - t0) * 1000)
 

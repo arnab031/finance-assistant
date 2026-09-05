@@ -32,8 +32,10 @@ from typing import Literal
 from api.compile import CompileError, compile_scalar
 from api.config import settings
 from api.db import Database
+from api.money import fmt_count, fmt_inr
+from api.profiles.base import get_profile
 from api.registry import SemanticRegistry
-from api.resolve.entities import VendorMatch, is_meaningful, resolve_vendor
+from api.semantic import search as semantic_search
 from api.schema import ClarifyEvent, ClarifyOption, NoteEvent, QuerySpec
 
 log = logging.getLogger("tbx.ambiguity")
@@ -58,8 +60,8 @@ class Interpretation:
     def preview(self) -> str:
         if self.value is None:
             return "no result"
-        n = f" · {self.rows:,} transactions" if self.rows is not None else ""
-        return f"${self.value:,.2f}{n}"
+        n = f" · {fmt_count(self.rows)} transactions" if self.rows is not None else ""
+        return f"{fmt_inr(self.value)}{n}"
 
 
 @dataclass
@@ -133,7 +135,7 @@ def _money_gap(a: Ambiguity) -> str:
     vals = [abs(i.value) for i in a.interpretations if i.value is not None]
     if len(vals) < 2:
         return "different amounts"
-    return f"${max(vals) - min(vals):,.0f}"
+    return fmt_inr(max(vals) - min(vals), places=0)
 
 
 @dataclass
@@ -275,42 +277,14 @@ def detect_scope(spec: QuerySpec, q: str, reg: SemanticRegistry) -> Ambiguity | 
     )
 
 
-def detect_entity(spec: QuerySpec, match: VendorMatch | None) -> Ambiguity | None:
-    """Which vendor did they mean? Fires when no single entity dominates."""
-    if match is None or len(match.candidates) < 2:
-        return None
-    if match.dominance() >= 0.85:
-        return None  # one vendor holds nearly all the spend; picking it is safe
-
-    top = match.candidates[0]
-    everyone = match.candidates
-    return Ambiguity(
-        kind="entity",
-        trigger=match.query,
-        message=f'"{match.query}" matches {len(everyone)} vendors, '
-                f"differing by {{gap}}.",
-        interpretations=[
-            Interpretation(
-                key="top", label=top.vendor_name,
-                detail=f"{top.txn_count:,} transactions on record",
-                spec=spec.patched(filters=spec.filters.model_copy(
-                    update={"vendor_ids": [top.vendor_id], "vendor_query": None}).model_dump()),
-            ),
-            Interpretation(
-                key="all", label=f"All {len(everyone)} matching vendors",
-                detail=", ".join(c.vendor_name for c in everyone[:4]),
-                spec=spec.patched(filters=spec.filters.model_copy(
-                    update={"vendor_ids": [c.vendor_id for c in everyone],
-                            "vendor_query": None}).model_dump()),
-            ),
-        ],
-        default_key="top",
-        is_money=spec.metric in _MONEY,
-    )
-
-
-_ONE_DAY = __import__("datetime").timedelta(days=1)
-_MONEY = {"amount_paid", "amount_total", "amount_pending", "amount_retainage", "avg_amount"}
+# detect_entity lived here: "which vendor did they mean?", fired when no single
+# vendor dominated the candidate list. It went with the vendor_payments profile.
+#
+# Its bank_txn counterpart is NOT another detector. A counterparty name is
+# matched with LIKE, which either finds rows or does not - there is no candidate
+# list to be ambiguous about. When LIKE finds nothing, the semantic index
+# proposes the closest name and DISCLOSES the substitution rather than asking:
+# see AmbiguityResolver._rescue_lexical_miss.
 
 
 # --------------------------------------------------------------------------
@@ -344,9 +318,10 @@ class AmbiguityResolver:
     ) -> Decision:
         settled = settled or {}
 
-        # Entity resolution happens first: it rewrites the spec (vendor_query ->
-        # vendor_ids) and its candidate list feeds the entity detector.
-        spec, match = await self._resolve_entities(spec)
+        # A lexical miss gets one semantic retry before anything else runs, so
+        # the detectors below reason about the filter that will actually execute.
+        spec, rescue = await self._rescue_lexical_miss(spec)
+        extra = [rescue] if rescue else []
 
         # Apply previously-settled choices BEFORE detecting the rest. Detectors
         # build their interpretations from the spec they are given, so running
@@ -354,13 +329,13 @@ class AmbiguityResolver:
         # computed on a basis they already rejected - e.g. after choosing the
         # payment-date reading of FY2026, the paid-vs-committed options would
         # still have been priced on the fiscal-year column.
-        spec = self._apply_settled(spec, question, match, settled)
+        spec = self._apply_settled(spec, question, settled)
 
-        found = [a for a in self._detect_all(spec, question, match)
+        found = [a for a in self._detect_all(spec, question)
                  if not self._settled_choice(a, settled)]
 
         if not found:
-            return Decision(spec=spec)
+            return Decision(spec=spec, notes=extra)
 
         await self._probe_all(found)
 
@@ -369,9 +344,10 @@ class AmbiguityResolver:
             worst = max(material, key=lambda a: (a.spread, a.absolute_gap or 0))
             log.info("clarify %s (%s) spread=%.1f%% gap=%s", worst.kind, worst.trigger,
                      worst.spread * 100, worst.absolute_gap)
-            return Decision(spec=spec, clarify=worst, detected=found)
+            return Decision(spec=spec, clarify=worst, notes=extra, detected=found)
 
-        notes = [a.disclosure() for a in found if a.spread >= settings.ambiguity_silent]
+        notes = extra + [a.disclosure() for a in found
+                         if a.spread >= settings.ambiguity_silent]
         for a in found:
             chosen = a.by_key(a.default_key)
             if chosen is not None:
@@ -382,13 +358,12 @@ class AmbiguityResolver:
     # ---- internals ----
 
     def _detect_all(
-        self, spec: QuerySpec, question: str, match: VendorMatch | None
+        self, spec: QuerySpec, question: str
     ) -> list[Ambiguity]:
         return [a for a in (
             detect_temporal(spec, question, self.reg),
             detect_metric(spec, question, self.reg),
             detect_scope(spec, question, self.reg),
-            detect_entity(spec, match),
         ) if a is not None]
 
     @staticmethod
@@ -399,7 +374,7 @@ class AmbiguityResolver:
         return settled.get(f"{a.kind}:{a.trigger}") or settled.get(a.kind)
 
     def _apply_settled(
-        self, spec: QuerySpec, question: str, match: VendorMatch | None,
+        self, spec: QuerySpec, question: str,
         settled: dict[str, str],
     ) -> QuerySpec:
         """Fold every remembered choice into the spec.
@@ -412,7 +387,7 @@ class AmbiguityResolver:
         """
         for _ in range(len(settled) + 2):
             applied = False
-            for a in self._detect_all(spec, question, match):
+            for a in self._detect_all(spec, question):
                 key = self._settled_choice(a, settled)
                 if not key:
                     continue
@@ -425,23 +400,56 @@ class AmbiguityResolver:
                 break
         return spec
 
-    async def _resolve_entities(self, spec: QuerySpec) -> tuple[QuerySpec, VendorMatch | None]:
-        vq = spec.filters.vendor_query
-        if not is_meaningful(vq):
-            if vq:
-                log.info("dropping generic vendor_query %r", vq)
-                spec = spec.patched(filters=spec.filters.model_copy(
-                    update={"vendor_query": None}).model_dump())
+    async def _rescue_lexical_miss(
+        self, spec: QuerySpec
+    ) -> tuple[QuerySpec, NoteEvent | None]:
+        """Retry a text filter semantically when it matched nothing at all.
+
+        This is the ONLY place the semantic index is read, and it fires only
+        after the lexical filter has already come back empty. That ordering is
+        the whole design: running semantic retrieval first was measured as a
+        regression on the stand-in, turning one confident candidate into eight
+        and a needless clarifying question. A fallback cannot do that, because
+        it never runs when LIKE succeeds.
+
+        "How much did we pay the electronics store?" is the case it exists for:
+        LIKE finds nothing, and cosine finds SELECTION ELECTRONICS DAHISAR EAST.
+
+        The substitution is always DISCLOSED. Silently answering about a
+        different name than the user typed would be the worst kind of helpful.
+        """
+        prof = get_profile()
+        if not settings.enable_semantic or not prof.semantic_sources:
             return spec, None
 
-        match = await resolve_vendor(vq, self.db)
-        if not match.candidates:
-            return spec, match
+        for source in prof.semantic_sources:
+            field = f"{source.entity_type}_like"
+            typed = getattr(spec.filters, field, None)
+            filt = prof.filters.get(field)
+            if not typed or filt is None:
+                continue
 
-        spec = spec.patched(filters=spec.filters.model_copy(
-            update={"vendor_ids": match.ids(all_candidates=False),
-                    "vendor_query": vq}).model_dump())
-        return spec, match
+            hits = await self.db.scalar(
+                f"SELECT COUNT(*) FROM {prof.fact} WHERE {filt.sql} LIKE %(p)s",
+                {"p": f"%{typed}%"},
+            )
+            if hits:
+                continue      # lexical worked; the index stays out of the way
+
+            found = await semantic_search(self.db, source.entity_type, typed, limit=3)
+            if not found:
+                continue
+
+            key, score = found[0]
+            log.info("semantic rescue: %r -> %r (cos=%.3f)", typed, key, score)
+            spec = spec.patched(filters=spec.filters.model_copy(
+                update={field: key}).model_dump())
+            return spec, NoteEvent(
+                kind="assumption",
+                text=(f"No {source.entity_type} matched “{typed}”. Answering for "
+                      f"“{key}”, the closest name in the data."),
+            )
+        return spec, None
 
     async def _probe_all(self, ambiguities: list[Ambiguity]) -> None:
         """Execute every interpretation concurrently. Cheap: indexed aggregates."""

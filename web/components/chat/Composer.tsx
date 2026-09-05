@@ -3,8 +3,11 @@
 import { useState } from "react";
 
 export default function Composer({
-  onSend, onStop, busy,
-}: { onSend: (t: string) => void; onStop: () => void; busy: boolean }) {
+  onSend, onStop, busy, placeholder,
+}: {
+  onSend: (t: string) => void; onStop: () => void; busy: boolean;
+  placeholder?: string;
+}) {
   const [text, setText] = useState("");
 
   return (
@@ -16,7 +19,7 @@ export default function Composer({
         className="composer-input"
         value={text}
         onChange={(e) => setText(e.target.value)}
-        placeholder="Ask about spend, vendors, or reconciliation…"
+        placeholder={placeholder ?? "Ask about your financial data…"}
         aria-label="Ask a question about your financial data"
         autoFocus
       />

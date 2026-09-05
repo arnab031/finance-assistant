@@ -26,6 +26,10 @@ async def main() -> int:
         if kind == "start":
             print(f"run {payload['run_id']}  {payload['total']} questions  "
                   f"model={payload['model']}\n" + "=" * 74)
+        elif kind == "error":
+            print(f"{RED}cannot run:{OFF} {payload['message']}")
+            await db.close()
+            return 1
         elif kind == "result":
             r = payload
             mark = f"{GREEN}pass{OFF}" if r.passed else f"{RED}FAIL{OFF}"

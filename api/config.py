@@ -8,11 +8,24 @@ from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_DEFAULT_DSN = f"postgresql://{os.environ.get('USER', 'postgres')}@localhost:5432/tbx_finance"
+_DEFAULT_DSN = "mysql://tbx:tbx@127.0.0.1:3306/tbx_live"
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    # ---- dataset ----
+    # Selects api/profiles/*.py, which supplies every domain-specific map:
+    # dimensions, metrics, filters, prompt rules, and what the schema does NOT
+    # hold. The stand-in profile (vendor_payments) was removed with the move to
+    # MySQL - it was PostgreSQL-only and its database no longer exists.
+    dataset: Literal["bank_txn"] = "bank_txn"
+
+    # ---- sensitive fields (api/crypto.py) ----
+    # HMAC key for tokenizing account_number. Never stored in the database,
+    # never logged, never committed. Rotating it invalidates every token, which
+    # is correct - they are lookup keys, not stored secrets.
+    sensitive_key: str = ""
 
     # ---- database ----
     database_url: str = _DEFAULT_DSN

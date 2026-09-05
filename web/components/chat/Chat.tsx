@@ -114,9 +114,11 @@ const nextId = () => `m${++counter}`;
 export default function Chat({
   coverage,
   suggestions,
+  placeholder,
 }: {
   coverage: Coverage | null;
   suggestions: string[];
+  placeholder?: string;
 }) {
   const [messages, dispatch] = useReducer(reduce, []);
   const [busy, setBusy] = useState(false);
@@ -190,7 +192,8 @@ export default function Chat({
         onChoose={choose}
         onSuggest={send}
       />
-      <Composer onSend={send} onStop={stop} busy={busy} />
+      <Composer onSend={send} onStop={stop} busy={busy}
+                placeholder={placeholder} />
     </div>
   );
 }

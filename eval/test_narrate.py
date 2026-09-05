@@ -98,7 +98,11 @@ async def main() -> int:
     print("PART 2 - hallucination injected through the real narrate() path")
     print("=" * 78)
     spec = QuerySpec.model_validate({
-        "intent": "aggregate", "metric": "amount_paid",
+        # debit_amount, not amount_paid: this is the bank_txn vocabulary. The
+        # figures below stay as they are on purpose - PART 2 is about whether a
+        # fabricated number survives narrate(), and that is independent of the
+        # dataset the rows came from.
+        "intent": "aggregate", "metric": "debit_amount",
         "period": {"start": "2026-08-01", "end": "2026-09-01", "label": "August 2026"},
     })
 

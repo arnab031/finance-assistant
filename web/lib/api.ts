@@ -73,6 +73,18 @@ export function clarifyStream(body: ClarifyRequest, signal?: AbortSignal) {
   return streamSSE("/api/clarify", body, signal);
 }
 
+export type Suggestions = {
+  dataset: string; label: string; placeholder: string; suggestions: string[];
+};
+
+/** Starter chips come from the backend so they always match the loaded schema. */
+export async function getSuggestions(): Promise<Suggestions | null> {
+  try {
+    const r = await fetch(`${API}/api/suggestions`, { cache: "no-store" });
+    return r.ok ? ((await r.json()) as Suggestions) : null;
+  } catch { return null; }
+}
+
 export async function getCoverage(): Promise<Coverage | null> {
   try {
     const res = await fetch(`${API}/api/coverage`, { cache: "no-store" });

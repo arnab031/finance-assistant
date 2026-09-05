@@ -13,7 +13,9 @@ from fastapi.responses import JSONResponse
 from api.config import settings
 from api.db import db
 from api.llm.base import get_llm
+from api.narration import ensure_counterparty
 from api.registry import SemanticRegistry
+from api.semantic import ensure_semantic_index
 from api.routes import ask as ask_routes
 from api.routes import ops as ops_routes
 
@@ -26,6 +28,16 @@ async def lifespan(app: FastAPI):
     await db.connect()
     applied = await db.migrate()
     log.info("migrations applied: %s", ", ".join(applied))
+
+    filled = await ensure_counterparty(db)
+    if filled:
+        log.info("counterparty backfilled for %d transactions", filled)
+
+    # Built on boot rather than by a script somebody has to remember to run.
+    # Fingerprinted, so an unchanged vocabulary costs one aggregate query.
+    app.state.semantic = await ensure_semantic_index(db)
+    for kind, outcome in app.state.semantic.items():
+        log.info("semantic index[%s]: %s", kind, outcome)
 
     app.state.registry = await SemanticRegistry.build(db)
     app.state.pending = {}   # ambiguity_id -> Ambiguity, awaiting a choice
@@ -75,7 +87,7 @@ async def coverage():
     return {
         "earliest": r.earliest, "latest": r.latest,
         "transaction_count": r.transaction_count, "total_paid": str(r.total_paid),
-        "currency": "USD", "vendor_count": r.vendor_count,
+        "currency": "INR", "vendor_count": r.vendor_count,
         "categories": r.categories, "payment_statuses": r.payment_statuses,
         "reconciliation_statuses": r.recon_statuses,
     }
@@ -138,27 +150,94 @@ async def metrics(hours: int = 24):
     }
 
 
+@app.get("/api/suggestions")
+async def suggestions():
+    """Starter questions for the active dataset. Served rather than hardcoded so
+    the chat never offers a question the loaded schema cannot answer."""
+    from api.profiles.base import get_profile
+
+    prof = get_profile()
+    return {"dataset": prof.name, "label": prof.label,
+            "placeholder": prof.placeholder, "suggestions": prof.suggestions}
+
+
 @app.get("/api/health")
 async def health() -> JSONResponse:
     """Phase 0 acceptance test. Checks every external dependency."""
     checks: dict[str, object] = {}
 
     try:
+        # Counted through the profile's fact source, not a hardcoded table name:
+        # the stand-in calls it `transactions`, the organizers' schema calls it
+        # `transaction`. Hardcoding made health report the database as down on a
+        # perfectly healthy dataset, which then blocked the canary preflight.
+        from api.profiles.base import get_profile
+
+        prof = get_profile()
         checks["database"] = {
             "ok": True,
-            "transactions": await db.scalar("SELECT COUNT(*) FROM transactions"),
+            "dataset": prof.name,
+            "rows": await db.scalar(f"SELECT COUNT(*) FROM {prof.fact}"),
         }
     except Exception as exc:  # noqa: BLE001 - health must never raise
         checks["database"] = {"ok": False, "error": str(exc)}
 
-    for ext in ("pg_trgm", "vector"):
-        try:
-            v = await db.scalar(
-                "SELECT extversion FROM pg_extension WHERE extname = %(n)s", {"n": ext}
-            )
-            checks[ext] = {"ok": v is not None, "version": v}
-        except Exception as exc:  # noqa: BLE001
-            checks[ext] = {"ok": False, "error": str(exc)}
+    from api.crypto import key_fingerprint
+
+    fp = key_fingerprint()
+    checks["sensitive_key"] = {
+        "ok": fp != "unset",
+        "fingerprint": fp,
+        "note": "account_number is tokenized; utr_number arrives pre-encrypted",
+    }
+
+    # Was a pg_trgm / pgvector probe. MySQL has neither, and the honest
+    # replacement is not a rename: it is a check that the FULLTEXT indexes
+    # standing in for trigram search actually exist, plus a flat statement that
+    # vector search is unavailable.
+    try:
+        n_ft = await db.scalar(
+            """SELECT COUNT(DISTINCT INDEX_NAME) FROM information_schema.STATISTICS
+               WHERE TABLE_SCHEMA = DATABASE() AND INDEX_TYPE = 'FULLTEXT'"""
+        )
+        checks["fulltext_indexes"] = {
+            "ok": bool(n_ft),
+            "count": n_ft,
+            "note": ("stands in for pg_trgm; matches whole words only, so "
+                     "substring hits inside a longer token need LIKE"),
+        }
+    except Exception as exc:  # noqa: BLE001
+        checks["fulltext_indexes"] = {"ok": False, "error": str(exc)}
+
+    # An empty semantic_index with no explanation is the reason "why is it
+    # empty?" got asked twice. Whatever the state, this says WHICH state and WHY.
+    try:
+        rows = await db.fetch(
+            """SELECT m.entity_type, m.n_labels, m.embed_model, m.built_at,
+                      COUNT(s.id) AS vectors
+               FROM semantic_index_meta m
+               LEFT JOIN semantic_index s
+                      ON s.entity_type = m.entity_type AND s.embedding IS NOT NULL
+               GROUP BY m.entity_type, m.n_labels, m.embed_model, m.built_at"""
+        )
+        checks["semantic_index"] = {
+            # Off is a valid, deliberate state - not a fault. A red light for a
+            # disabled feature trains everyone to ignore this endpoint.
+            "ok": True,
+            "enabled": settings.enable_semantic,
+            "indexes": {r["entity_type"]: {"labels": r["n_labels"],
+                                           "vectors": r["vectors"],
+                                           "model": r["embed_model"],
+                                           "built_at": str(r["built_at"])}
+                        for r in rows},
+            "note": ("built on boot from Profile.semantic_sources; searched in "
+                     "Python because MySQL 8.4 has no vector type"
+                     if settings.enable_semantic else
+                     "empty by design: ENABLE_SEMANTIC=false, nothing builds or "
+                     "reads it"),
+        }
+    except Exception as exc:  # noqa: BLE001
+        checks["semantic_index"] = {"ok": False, "error": str(exc)}
 
     try:
         async with httpx.AsyncClient(timeout=5) as client:

@@ -17,6 +17,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from api.config import settings
+from api.clock import rows_with_instants, with_instants
 from api.db import db
 from api.observability import jsonable
 from eval.harness import load_questions, run_eval
@@ -119,7 +120,8 @@ async def scorecard():
         """SELECT run_id, model, started_at, n_total, n_passed, duration_ms
            FROM eval_runs WHERE finished_at IS NOT NULL
            ORDER BY started_at DESC LIMIT 12""")
-    return {"models": [dict(r) for r in rows], "history": [dict(h) for h in history]}
+    return {"models": rows_with_instants(rows),
+            "history": rows_with_instants(history)}
 
 
 @router.get("/api/eval/runs/{run_id}")
@@ -132,14 +134,14 @@ async def eval_run_detail(run_id: str):
                   latency_ms, spec
            FROM eval_results WHERE run_id = %(r)s
            ORDER BY passed ASC, question_id""", {"r": run_id})
-    return {"run": dict(run), "results": [dict(r) for r in results]}
+    return {"run": with_instants(run), "results": [dict(r) for r in results]}
 
 
 @router.get("/api/incidents")
 async def incidents(limit: int = 25):
     rows = await db.fetch(
         "SELECT * FROM v_incidents LIMIT %(l)s", {"l": min(limit, 100)})
-    return {"incidents": [dict(r) for r in rows]}
+    return {"incidents": rows_with_instants(rows)}
 
 
 @router.get("/api/replay/{query_log_id}")

@@ -1,6 +1,16 @@
 """
-Phase 4 regression: the four failures measured in the zero-shot baseline probe,
-plus guardrail behaviour.
+Extraction regression - bank_txn on MySQL.
+
+Deliberately NOT a copy of the canary. The 40 golden questions grade a spec or a
+number; these assert on the things a grade cannot see:
+
+  * that a refusal runs NO QUERY at all, rather than running one and reporting
+    zero - the difference between "there is no data" and a confident $0.00
+  * the note text the user actually reads
+  * that a strong default is DISCLOSED rather than turned into a question,
+    which is the over-asking failure AMBIGUITY.md is about
+
+Every case here is a bug that existed in this codebase, not a hypothetical.
 
     ./.venv/bin/python -m eval.test_extract     (API must be running)
 """
@@ -59,50 +69,39 @@ def check(name: str):
     return deco
 
 
-# ---- the four measured baseline failures ---------------------------------
+# ---- absent concepts: the schema knows what it does not hold --------------
 
-@check("BASELINE FIX: 'vendor payouts' is not a vendor name")
+@check("absent concept declines WITHOUT running a query")
 async def _():
     r = await ask("How much did we spend on vendor payouts last month?")
-    vq = r["spec"]["filters"]["vendor_query"]
-    assert vq is None, f"vendor_query should be null, got {vq!r}"
-    assert value_of(r) == "1068521181.57", value_of(r)
-    return f"vendor_query=None, value={value_of(r)}"
+    assert r["spec"]["intent"] == "unsupported", r["spec"]["intent"]
+    # The important half. The model previously agreed there were no vendors,
+    # then put "vendor" in counterparty_like and answered with every debit in
+    # the month - a confident number for an unanswerable question.
+    assert "rows" not in r, "unsupported must not execute a query"
+    assert r["notes"], "a decline must say why"
+    return f"intent=unsupported, note={r['notes'][0][:66]}..."
 
 
-@check("BASELINE FIX: 'Top 5 vendors' is not a vendor name")
+@check("absent concept: reconciliation")
 async def _():
-    r = await ask("Top 5 vendors by spend in the last 12 months")
-    s = r["spec"]
-    vq = s["filters"]["vendor_query"]
-    assert vq is None, f"vendor_query should be null, got {vq!r}"
-    assert s["group_by"] == ["vendor"], s["group_by"]
-    assert len(r["rows"]) == 5, f"expected 5 rows, got {len(r['rows'])}"
-    return f"group_by=vendor, limit honoured, top={r['rows'][0][0]}"
+    r = await ask("Which transactions are still unreconciled?")
+    assert r["spec"]["intent"] == "unsupported", r["spec"]["intent"]
+    assert "rows" not in r
+    return r["notes"][0][:70] + "..."
 
 
-@check("BASELINE FIX: FY2026 emits a year, never Apr-Mar dates")
-async def _():
-    r = await ask("How much did we pay McKesson in FY2026?")
-    s = r["spec"]
-    assert s["date_basis"] == "fiscal_year", s["date_basis"]
-    assert s["fiscal_year"] == "2026", s["fiscal_year"]
-    assert s["period"] is None, f"period must be None, got {s['period']}"
-    assert (s["filters"]["vendor_query"] or "").lower().startswith("mckesson")
-    return f"fiscal_year={s['fiscal_year']}, period=None, vendor={s['filters']['vendor_query']!r}"
-
-
-@check("BASELINE FIX: headcount is unsupported, not an aggregate")
+@check("absent concept: headcount")
 async def _():
     r = await ask("What is our headcount?")
     assert r["spec"]["intent"] == "unsupported", r["spec"]["intent"]
-    assert "rows" not in r, "unsupported must not run a query"
+    assert "rows" not in r
     return f"intent=unsupported, note={r['notes'][0][:60]}..."
 
 
-# ---- guardrails ----------------------------------------------------------
+# ---- coverage guardrails --------------------------------------------------
 
-@check("GUARDRAIL: out-of-range period says no data, never $0.00")
+@check("GUARDRAIL: out-of-range period says no data, never 0.00")
 async def _():
     r = await ask("How much did we spend in December 2026?")
     assert "rows" not in r, "must not execute a query outside coverage"
@@ -111,45 +110,75 @@ async def _():
     return r["notes"][0][:70] + "..."
 
 
-@check("GUARDRAIL: partial coverage is disclosed")
+@check("GUARDRAIL: partial coverage is disclosed, not silently truncated")
 async def _():
-    r = await ask("How much did we spend on vendor payouts last month?")
+    r = await ask("How much did we spend between May 2026 and August 2026?")
     assert any("partial coverage" in n.lower() for n in r["notes"]), r["notes"]
-    return [n for n in r["notes"] if "artial" in n][0][:70]
+    assert r.get("rows"), "partial coverage still answers, it just says so"
+    return [n for n in r["notes"] if "artial" in n][0][:76]
 
 
-# ---- core capability -----------------------------------------------------
+# ---- counterparty: the only name mechanism this schema has ----------------
 
-@check("reconciliation question routes to reconcile AND asks about scope")
+@check("a company name goes to counterparty_like, and resolves")
 async def _():
-    r = await ask("Which transactions are still unreconciled?")
-    assert r["spec"]["intent"] == "reconcile", r["spec"]["intent"]
-    c = r.get("clarify")
-    assert c is not None, "28.5% scope spread should trigger a clarify"
-    assert c["kind"] == "scope", c["kind"]
-    return f"intent=reconcile, asks scope: {c['options'][0]['preview']} vs {c['options'][1]['preview']}"
+    r = await ask("How much did we pay Reliance Digital?")
+    cp = r["spec"]["filters"].get("counterparty_like")
+    assert cp, f"counterparty_like should be set, got {cp!r}"
+    assert value_of(r) == "21156.00", value_of(r)
+    return f"counterparty_like={cp!r}, value={value_of(r)}"
 
 
-@check("metric nuance is disclosed, never asked (no over-asking)")
+@check("a generic phrase is NOT a counterparty name")
 async def _():
-    r = await ask("How much did we spend on vendor payouts last month?")
-    assert "clarify" not in r, "metric has a strong default; must not block"
-    notes = " ".join(r["notes"]).lower()
-    assert "committed" in notes or "paid out" in notes, r["notes"]
-    return [n for n in r["notes"] if "committed" in n.lower()][0][:88]
+    r = await ask("Who did we pay the most?")
+    s = r["spec"]
+    cp = s["filters"].get("counterparty_like")
+    assert not cp, f"counterparty_like should be empty, got {cp!r}"
+    assert s["group_by"] == ["counterparty"], s["group_by"]
+    return f"counterparty_like={cp!r}, group_by={s['group_by']}"
 
 
-@check("category breakdown groups correctly")
+# ---- metric and filter nuances that returned wrong money ------------------
+
+@check("'largest transaction' is MAX, not a SUM")
 async def _():
-    r = await ask("Break down spend by category last month")
-    assert r["spec"]["group_by"] == ["category"], r["spec"]["group_by"]
-    assert len(r.get("rows", [])) > 5
-    return f"{len(r['rows'])} categories, top={r['rows'][0][0]!r}"
+    r = await ask("What was our single largest transaction?")
+    assert r["spec"]["metric"] == "max_amount", r["spec"]["metric"]
+    assert value_of(r) == "260000.00", value_of(r)
+    return f"metric=max_amount, value={value_of(r)}"
+
+
+@check("'over 50000' is exclusive on the boundary row")
+async def _():
+    r = await ask("List the debits over 50000")
+    f = r["spec"]["filters"]
+    assert f.get("min_amount") is not None, "min_amount must be populated"
+    # One debit sits at exactly 50,000. An inclusive bound returns three rows
+    # where two are correct.
+    assert len(r["rows"]) == 2, f"expected 2 rows, got {len(r['rows'])}"
+    return f"min_amount={f['min_amount']} exclusive={f.get('min_amount_exclusive')}, 2 rows"
+
+
+@check("'split between credits and debits' actually groups by direction")
+async def _():
+    r = await ask("Show the split between credits and debits")
+    assert r["spec"]["group_by"] == ["transaction_type"], r["spec"]["group_by"]
+    assert len(r["rows"]) == 2, f"expected 2 rows, got {len(r['rows'])}"
+    return f"group_by=transaction_type, {len(r['rows'])} rows"
+
+
+@check("no over-asking: a strong default answers instead of blocking")
+async def _():
+    r = await ask("How much did we spend in June 2026?")
+    assert "clarify" not in r, "spend has a strong default; must not block"
+    assert value_of(r) == "169299.00", value_of(r)
+    return f"answered directly, value={value_of(r)}"
 
 
 @check("month-over-month comparison")
 async def _():
-    r = await ask("How does August 2026 compare to the month before?")
+    r = await ask("How does June 2026 compare to the month before?")
     s = r["spec"]
     assert s["intent"] == "compare", s["intent"]
     assert s["compare_period"] is not None
@@ -159,7 +188,7 @@ async def _():
 async def main() -> int:
     passed = failed = 0
     print("=" * 78)
-    print("PHASE 4 - EXTRACTION REGRESSION  (qwen2.5:7b-instruct)")
+    print("EXTRACTION REGRESSION - bank_txn / MySQL  (qwen2.5:7b-instruct)")
     print("=" * 78)
     for name, fn in CHECKS:
         try:

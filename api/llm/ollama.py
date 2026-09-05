@@ -26,6 +26,17 @@ from api.llm.base import LLMResult
 log = logging.getLogger("tbx.llm.ollama")
 
 
+class ModelUnavailable(RuntimeError):
+    """Ollama returned 404 - the model was never pulled.
+
+    Worth its own type: the generic handler reported "something went wrong
+    running that query", which points at the database when the database is fine.
+    A 50-question canary against a missing model failed every question in ~42ms
+    and recorded a 0% row, which reads as a model that performs terribly rather
+    than one that was never called.
+    """
+
+
 class OllamaLLM:
     def __init__(self, model: str | None = None) -> None:
         self.model = model or settings.ollama_model
@@ -52,6 +63,10 @@ class OllamaLLM:
                 "options": {"temperature": 0, "num_ctx": 8192},
             },
         )
+        if resp.status_code == 404:
+            raise ModelUnavailable(
+                f"Model {self.model!r} is not installed. Run: ollama pull {self.model}"
+            )
         resp.raise_for_status()
         body = resp.json()
         content = body["message"]["content"]
@@ -88,6 +103,11 @@ class OllamaLLM:
                             "num_predict": settings.narration_max_tokens},
             },
         ) as resp:
+            if resp.status_code == 404:
+                raise ModelUnavailable(
+                    f"Model {self.model!r} is not installed. "
+                    f"Run: ollama pull {self.model}"
+                )
             resp.raise_for_status()
             async for line in resp.aiter_lines():
                 if not line.strip():

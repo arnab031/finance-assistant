@@ -113,11 +113,13 @@ class RequestTrace:
 
         await db.execute(
             """INSERT INTO chat_threads (thread_id) VALUES (%(t)s)
-               ON CONFLICT (thread_id) DO NOTHING""",
+               ON DUPLICATE KEY UPDATE thread_id = thread_id""",
             {"t": self.thread_id},
         )
 
-        row = await db.fetchone(
+        # MySQL has no RETURNING; the id comes back as lastrowid on the same
+        # cursor that ran the INSERT.
+        query_log_id = await db.insert_returning_id(
             """
             INSERT INTO query_log (
                 thread_id, question, spec, sql_text, row_count, sql_ms,
@@ -131,7 +133,7 @@ class RequestTrace:
                 %(model)s, %(verified)s, %(clarified)s, %(err)s, %(repaired)s,
                 %(coerced)s, %(sanity)s, %(template)s, %(unver)s, %(amb)s,
                 %(intent)s, %(resumed)s, %(total_ms)s
-            ) RETURNING id
+            )
             """,
             {
                 "thread": self.thread_id, "q": self.question, "spec": spec_json,
@@ -141,13 +143,15 @@ class RequestTrace:
                 "model": self.model, "verified": self.verified,
                 "clarified": self.clarified, "err": self.error,
                 "repaired": self.repaired, "coerced": self.coerced,
-                "sanity": self.sanity_corrected, "template": self.template_used,
-                "unver": self.unverified, "amb": self.ambiguity_kind,
+                # TEXT[] under Postgres, JSON here - the driver will not adapt
+                # a Python list on its own, so both are dumped explicitly.
+                "sanity": json.dumps(self.sanity_corrected),
+                "template": self.template_used,
+                "unver": json.dumps(self.unverified), "amb": self.ambiguity_kind,
                 "intent": intent, "resumed": self.resumed,
                 "total_ms": self.total_ms,
             },
         )
-        query_log_id = row["id"] if row else None
 
         # Conversation record. Doubles as the "sample questions and answers"
         # submission deliverable - export it rather than writing it by hand.
@@ -160,7 +164,7 @@ class RequestTrace:
             await db.execute(
                 """INSERT INTO chat_messages (message_id, thread_id, seq, role, question)
                    VALUES (%(id)s, %(t)s, %(seq)s, 'user', %(q)s)
-                   ON CONFLICT (message_id) DO NOTHING""",
+                   ON DUPLICATE KEY UPDATE message_id = message_id""",
                 {"id": f"usr_{uuid.uuid4().hex[:12]}", "t": self.thread_id,
                  "seq": seq + 1, "q": self.question},
             )
@@ -173,7 +177,7 @@ class RequestTrace:
                ) VALUES (
                    %(id)s, %(t)s, %(seq)s, 'assistant', %(q)s, %(spec)s, %(sql)s,
                    %(result)s, %(narr)s, %(verified)s, %(conf)s, %(ms)s, %(qid)s
-               ) ON CONFLICT (message_id) DO NOTHING""",
+               ) ON DUPLICATE KEY UPDATE message_id = message_id""",
             {
                 "id": self.message_id, "t": self.thread_id, "seq": seq + 1,
                 "q": self.question, "spec": spec_json, "sql": self.sql,

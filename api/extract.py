@@ -33,143 +33,37 @@ log = logging.getLogger("tbx.extract")
 
 SYSTEM = """You convert finance questions into a QuerySpec JSON object.
 
-You NEVER compute numbers. You NEVER invent vendor names, categories, or departments.
-Your only job is to describe WHAT should be computed. A SQL compiler does the rest.
+You NEVER compute numbers. You NEVER invent names, categories, or values that
+are not in the data below. Your only job is to describe WHAT should be computed.
+A SQL compiler does the rest.
 
 {coverage}
 
 {dates}
 
 RULES
-
-metric
-  "spend", "spent", "paid", "payouts"        -> amount_paid
-  "committed", "owed", "outstanding balance" -> amount_total
-  "pending"                                  -> amount_pending
-  "how many transactions"                    -> txn_count
-  "how many vendors"                         -> vendor_count
-
-date_basis
-  ONLY these three phrasings mean "fiscal_year": "FY2026", "fiscal 2026",
-  "fiscal year 2026". For those, set date_basis "fiscal_year" and set
-  fiscal_year to the YEAR ONLY, e.g. "2026". Never invent start/end dates for a
-  fiscal year; omit period entirely.
-
-  EVERYTHING ELSE means "payment_date". Set period {{start, end}} from the
-  resolved windows above.
-
-  IF THE QUESTION MENTIONS NO TIME AT ALL, OMIT period ENTIRELY. Do not default
-  to this year or any other window. "How much is still pending?" and "What was
-  our total spend?" cover ALL the data; adding a period silently answers a
-  narrower question than the one asked.
-
-  "quarter", "last quarter", "this quarter", "Q1".."Q4", "month", "last month",
-  "week" are NOT fiscal phrasings. A fiscal_year holds a whole year and CANNOT
-  express a quarter or a month, so choosing it for those questions is always
-  wrong. Use payment_date with the resolved window.
-
-filters.vendor_query
-  Fill ONLY when the question names a specific company.
-  These are NOT company names - leave vendor_query out entirely:
-      "vendor payouts", "vendors", "suppliers", "top vendors", "payments",
-      "payouts", "transactions", "spend"
-
-intent
-  aggregate  - one number, optionally grouped
-  list       - individual transactions
-  compare    - two periods side by side (set compare_period or compare_fiscal_year)
-  reconcile  - anything about reconciliation status
-  anomaly    - unusually large payments vs a vendor's own history
-  unsupported- the data cannot answer it. The database contains ONLY vendor
-               payments: transactions, payouts, reconciliation, chart of
-               accounts, vendors, departments, funds. It has NO employees,
-               headcount, payroll, budgets, forecasts, revenue, or inventory.
+{rules}
 
 Put anything you were unsure about into `ambiguities`."""
 
 
 # Each example fixes a failure observed in the zero-shot baseline probe.
-FEWSHOT: list[tuple[str, dict[str, Any]]] = [
-    # Baseline put vendor_query="payouts" here, which would filter to nothing.
-    ("How much did we spend on vendor payouts last month?",
-     {"intent": "aggregate", "metric": "amount_paid", "group_by": [],
-      "date_basis": "payment_date",
-      "period": {"start": "2026-08-01", "end": "2026-09-01", "label": "August 2026"},
-      "reasoning": "'vendor payouts' is the subject, not a company name"}),
-
-    # Baseline put the entire question into vendor_query.
-    ("Top 5 vendors by spend in the last 12 months",
-     {"intent": "aggregate", "metric": "amount_paid", "group_by": ["vendor"],
-      "date_basis": "payment_date",
-      "period": {"start": "2025-09-01", "end": "2026-09-01", "label": "last 12 months"},
-      "sort_desc": True, "limit": 5,
-      "reasoning": "ranking vendors; no specific company named"}),
-
-    # Baseline produced an Indian fiscal year here.
-    ("How much did we pay McKesson in FY2026?",
-     {"intent": "aggregate", "metric": "amount_paid", "group_by": [],
-      "date_basis": "fiscal_year", "fiscal_year": "2026",
-      "filters": {"vendor_query": "McKesson"},
-      "reasoning": "fiscal basis, so year only and no period"}),
-
-    # Baseline answered this as an aggregate instead of refusing.
-    ("What is our headcount?",
-     {"intent": "unsupported", "metric": "amount_paid", "group_by": [],
-      "date_basis": "payment_date",
-      "reasoning": "no employee or headcount data in this database"}),
-
-    ("Which transactions are still unreconciled?",
-     {"intent": "reconcile", "metric": "amount_total", "group_by": [],
-      "date_basis": "payment_date",
-      "filters": {"reconciliation_status": ["Unreconciled"]},
-      "ambiguities": ["'unreconciled' could mean only Unreconciled, or every "
-                      "status that is not Reconciled"]}),
-
-    ("How does August 2026 compare to the month before?",
-     {"intent": "compare", "metric": "amount_paid", "group_by": [],
-      "date_basis": "payment_date",
-      "period": {"start": "2026-08-01", "end": "2026-09-01", "label": "August 2026"},
-      "compare_period": {"start": "2026-07-01", "end": "2026-08-01", "label": "July 2026"}}),
-
-    ("Break down spend by category last month",
-     {"intent": "aggregate", "metric": "amount_paid", "group_by": ["category"],
-      "date_basis": "payment_date",
-      "period": {"start": "2026-08-01", "end": "2026-09-01", "label": "August 2026"},
-      "limit": 50}),
-
-    ("Show me the 10 largest payments in August 2026",
-     {"intent": "list", "metric": "amount_paid", "group_by": [],
-      "date_basis": "payment_date",
-      "period": {"start": "2026-08-01", "end": "2026-09-01", "label": "August 2026"},
-      "sort_desc": True, "limit": 10}),
-
-    # "quarter" reads as a fiscal word to a 7B: this exact question returned
-    # date_basis "fiscal_year" with fiscal_year "2026", answering $16.8B for a
-    # quarter worth $5.1B. A fiscal year cannot express a quarter at all.
-    ("Spend by fund type last quarter",
-     {"intent": "aggregate", "metric": "amount_paid", "group_by": ["fund_type"],
-      "date_basis": "payment_date",
-      "period": {"start": "2026-04-01", "end": "2026-07-01", "label": "Q2 2026"},
-      "reasoning": "a quarter is a date window, never a fiscal_year"}),
-
-    # No status word in the question, so no status filter in the spec. The model
-    # volunteered payment_status ["Paid"] here unprompted, which silently
-    # excluded reversals and moved the answer by $127M.
-    ("How much did we spend last quarter?",
-     {"intent": "aggregate", "metric": "amount_paid", "group_by": [],
-      "date_basis": "payment_date",
-      "period": {"start": "2026-04-01", "end": "2026-07-01", "label": "Q2 2026"},
-      "reasoning": "no status was mentioned, so no status filter"}),
-]
-
 
 def build_system(reg: SemanticRegistry) -> str:
-    return SYSTEM.format(coverage=reg.prompt_context(), dates=prompt_block())
+    """Rules come from the active profile: the two datasets have genuinely
+    different vocabularies, and offering a model metrics that do not exist in
+    the loaded schema is the fastest way to get a wrong answer."""
+    from api.profiles.base import get_profile
+
+    return SYSTEM.format(coverage=reg.prompt_context(), dates=prompt_block(),
+                         rules=get_profile().prompt_rules.strip())
 
 
 def build_user(question: str, previous: QuerySpec | None = None) -> str:
+    from api.profiles.base import get_profile
+
     parts: list[str] = []
-    for q, spec in FEWSHOT:
+    for q, spec in get_profile().fewshot:
         parts.append(f"Q: {q}\nA: {json.dumps(spec, separators=(',', ':'))}")
     if previous is not None:
         parts.append(
@@ -328,10 +222,73 @@ def _strip_unasked_status_filters(spec: QuerySpec, question: str) -> QuerySpec:
     )
 
 
+# "over"/"above"/"more than" are strict; "at least"/"minimum"/"or more" are not.
+_MIN_STRICT = re.compile(r"\b(over|above|more than|greater than|exceed\w*)\b", re.I)
+_MAX_STRICT = re.compile(r"\b(under|below|less than|smaller than)\b", re.I)
+
+
+def _set_bound_strictness(spec: QuerySpec, question: str) -> QuerySpec:
+    """Decide < vs <= from the words the user actually used.
+
+    The model emits the number; this decides the comparator. Asked to list
+    "debits over 50000" against data holding a debit of exactly 50000, an
+    inclusive bound returned three rows where two were correct - the kind of
+    error that never looks like one.
+    """
+    if spec.filters.min_amount is None and spec.filters.max_amount is None:
+        return spec
+
+    lo = spec.filters.min_amount is not None and bool(_MIN_STRICT.search(question))
+    hi = spec.filters.max_amount is not None and bool(_MAX_STRICT.search(question))
+    if not (lo or hi):
+        return spec
+
+    return spec.patched(
+        filters=spec.filters.model_copy(
+            update={"min_amount_exclusive": lo, "max_amount_exclusive": hi}
+        ).model_dump()
+    )
+
+
+def _force_unsupported_for_absent_concepts(
+    spec: QuerySpec, question: str
+) -> QuerySpec:
+    """Decline questions about domains this schema provably does not contain.
+
+    The prompt already says there are no vendors. Asked "how much did we spend
+    on vendor payouts last month?" the model agreed there were none, then put
+    "vendor" into counterparty_like and answered with every debit in August -
+    a confident number for a question the data cannot answer. Nothing about the
+    result looked wrong, which is what makes it the worst failure mode here.
+
+    So the check is deterministic and lives on the profile. A schema knows what
+    it does not hold; that knowledge should not depend on a 7B model's mood.
+    """
+    from api.profiles.base import get_profile
+
+    prof = get_profile()
+    for pattern, reason in prof.absent_concepts:
+        if re.search(pattern, question, re.I):
+            if spec.intent == "unsupported":
+                # Already declining, but attach the specific reason anyway:
+                # ask.py surfaces it to the user, and "there is no budget data
+                # here" beats a generic list of everything the schema lacks.
+                return spec.patched(reasoning=reason)
+            log.info("forcing unsupported: %r matched %r", question, pattern)
+            return spec.patched(
+                intent="unsupported",
+                reasoning=reason,
+                ambiguities=[*spec.ambiguities, reason],
+            )
+    return spec
+
+
 def sanity_pass(spec: QuerySpec, question: str) -> QuerySpec:
     spec = _correct_subyear_basis(spec, question)
     spec = _strip_invented_period(spec, question)
-    return _strip_unasked_status_filters(spec, question)
+    spec = _strip_unasked_status_filters(spec, question)
+    spec = _set_bound_strictness(spec, question)
+    return _force_unsupported_for_absent_concepts(spec, question)
 
 
 async def extract(

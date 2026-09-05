@@ -13,6 +13,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Logo from "@/components/Logo";
+import { formatInstant } from "@/lib/format";
 import {
   EvalResult, Incident, Metrics, ModelScore, RunSummary,
   getMetrics, getReplay, getRun, getScorecard, runEval,
@@ -164,7 +165,7 @@ export default function Ops() {
             <span className="score-of">/ {latest.n_total}</span>
             <span className="score-model">
               {latest.model} · {ms(latest.duration_ms)} ·{" "}
-              {new Date(latest.started_at).toLocaleString()}
+              {formatInstant(latest.started_at)}
             </span>
           </div>
         ) : (

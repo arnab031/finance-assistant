@@ -1,0 +1,281 @@
+# Golden question set — bank_txn profile (organizers' schema).
+#
+# Ground truth is a QUERY, recomputed every run, so this file stays valid when
+# the real export replaces the 10 sample rows.
+#
+# IMPORTANT: coverage is 2025-12-03 .. 2026-06-24 while "today" is later, so
+# "last month" resolves OUTSIDE the data. Numeric questions therefore name real
+# months (June 2026, May 2026, December 2025); relative phrasing is used only in
+# the behaviour tests, where landing outside coverage is the point.
+#
+# Ground-truth SQL is MySQL now. Date bounds are plain string literals: MySQL's
+# TIMESTAMP 'x' form rejects a date without a time part, and a bare literal
+# compares against DATETIME correctly anyway.
+#
+# The three failure modes this schema invites, and the questions that catch them:
+#   1. UNSIGNED AMOUNTS — "spend" must be debits only, never gross. q001/q020.
+#   2. NO COUNTERPARTY TABLE — a company name is a description search. q014/q023.
+#   3. MISSING DOMAIN — no reconciliation, vendors or categories exist at all,
+#      so the assistant must decline rather than improvise. q030-q035.
+
+# ---------------------------------------------------------------- direction
+- id: q001
+  question: How much did we spend in total?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction WHERE transaction_type = 'debit'
+
+- id: q002
+  question: How much money came in in total?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction WHERE transaction_type = 'credit'
+
+- id: q003
+  question: What was the net movement across all accounts?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(CASE WHEN transaction_type = 'credit'
+                    THEN transaction_amount ELSE -transaction_amount END)
+    FROM transaction
+
+- id: q004
+  question: How many transactions are there in total?
+  grade: numeric
+  truth_sql: SELECT COUNT(*) FROM transaction
+
+- id: q005
+  question: How many accounts do we have transactions for?
+  grade: numeric
+  truth_sql: SELECT COUNT(DISTINCT account_id) FROM transaction
+
+# ---------------------------------------------------------------- periods
+- id: q006
+  question: How much did we spend in June 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit'
+      AND transaction_date >= '2026-06-01' AND transaction_date < '2026-07-01'
+
+- id: q007
+  question: How much did we spend in May 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit'
+      AND transaction_date >= '2026-05-01' AND transaction_date < '2026-06-01'
+
+- id: q008
+  question: How much money came in during December 2025?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'credit'
+      AND transaction_date >= '2025-12-01' AND transaction_date < '2026-01-01'
+
+- id: q009
+  question: How many transactions happened in June 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT COUNT(*) FROM transaction
+    WHERE transaction_date >= '2026-06-01' AND transaction_date < '2026-07-01'
+
+# ---------------------------------------------------------------- grouping
+- id: q010
+  question: Which bank did we spend the most through?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(t.transaction_amount) FROM transaction t
+    JOIN account a ON a.account_id = t.account_id
+    JOIN bank b ON b.bank_code = a.bank_code
+    WHERE t.transaction_type = 'debit'
+    GROUP BY b.bank_name ORDER BY 1 DESC LIMIT 1
+
+- id: q011
+  question: Break down spending by bank
+  grade: numeric
+  compare: sum
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction WHERE transaction_type = 'debit'
+
+- id: q012
+  question: Show the split between credits and debits
+  grade: numeric
+  compare: rows
+  truth_sql: SELECT COUNT(DISTINCT transaction_type) FROM transaction
+
+- id: q013
+  question: Break down spending by month
+  grade: numeric
+  compare: sum
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction WHERE transaction_type = 'debit'
+
+# ---------------------------------------------------------------- counterparty search
+# There is no vendor table. These verify the assistant searches `description`.
+- id: q014
+  question: How much did we pay to SELECTION?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit' AND description LIKE '%SELECTION%'
+
+- id: q015
+  question: How much did we pay Reliance Digital?
+  grade: numeric
+  truth_sql: >
+    SELECT COALESCE(SUM(transaction_amount), 0) FROM transaction
+    WHERE transaction_type = 'debit' AND description LIKE '%RELIANCE%'
+
+# ---------------------------------------------------------------- lookup
+- id: q016
+  question: Find the transaction with reference 1715499972
+  grade: numeric
+  compare: rows
+  truth_sql: >
+    SELECT COUNT(*) FROM transaction WHERE transaction_reference_id = '1715499972'
+
+- id: q017
+  question: Show me the 3 largest transactions
+  grade: numeric
+  compare: rows
+  truth_sql: SELECT 3
+
+- id: q018
+  question: List the debits over 50000
+  grade: numeric
+  compare: rows
+  truth_sql: >
+    SELECT COUNT(*) FROM transaction
+    WHERE transaction_type = 'debit' AND transaction_amount > 50000
+
+- id: q019
+  question: What was our single largest transaction?
+  grade: numeric
+  truth_sql: SELECT MAX(transaction_amount) FROM transaction
+
+# ---------------------------------------------------------------- spec: extraction
+# The unsigned-amount trap. "Spend" must be debits only; gross_amount would add
+# credits and debits together and answer nothing anyone asked.
+- id: q020
+  question: How much did we spend in June 2026?
+  grade: spec
+  expect_spec: {metric: debit_amount, date_basis: payment_date}
+
+- id: q021
+  question: How much did we receive in June 2026?
+  grade: spec
+  expect_spec: {metric: credit_amount}
+
+- id: q022
+  question: What is the net flow for June 2026?
+  grade: spec
+  expect_spec: {metric: net_amount}
+
+- id: q023
+  question: How much did we pay Reliance Digital?
+  grade: spec
+  expect_spec: {metric: debit_amount, counterparty_like: RELIANCE}
+
+- id: q024
+  question: Break down spend by bank
+  grade: spec
+  expect_spec: {group_by: [bank], metric: debit_amount}
+
+- id: q025
+  question: Show me the 5 largest debits
+  grade: spec
+  expect_spec: {intent: list, limit: 5}
+
+- id: q026
+  question: How many accounts do we have?
+  grade: spec
+  expect_spec: {metric: account_count}
+
+- id: q027
+  question: Compare June 2026 with May 2026
+  grade: spec
+  expect_spec: {intent: compare, date_basis: payment_date}
+
+- id: q028
+  question: Break down transactions by bank for each month
+  grade: spec
+  expect_spec: {group_by: [bank, month]}
+
+- id: q029
+  question: Which transactions were unusually large?
+  grade: spec
+  expect_spec: {intent: anomaly}
+
+# ---------------------------------------------------------------- behaviour: must decline
+# Every one of these names something the brief's own schema does not contain.
+# Answering any of them would mean inventing data.
+- id: q030
+  question: Which transactions are still unreconciled?
+  grade: behaviour
+  expect: must_be_unsupported
+  note: >
+    One of the two reference questions in the problem statement. This schema has
+    NO reconciliation status of any kind, so declining is the only honest answer.
+
+- id: q031
+  question: How much did we spend on vendor payouts last month?
+  grade: behaviour
+  expect: must_be_unsupported
+  note: the other reference question; there is no vendor or payout structure here
+
+- id: q032
+  question: Break down spend by expense category
+  grade: behaviour
+  expect: must_be_unsupported
+  note: no chart of accounts, no categories
+
+- id: q033
+  question: What is our headcount?
+  grade: behaviour
+  expect: must_be_unsupported
+
+- id: q034
+  question: What is our budget for next quarter?
+  grade: behaviour
+  expect: must_be_unsupported
+
+- id: q035
+  question: Which invoices are overdue?
+  grade: behaviour
+  expect: must_be_unsupported
+  note: no invoice table
+
+# ---------------------------------------------------------------- behaviour: coverage
+- id: q036
+  question: How much did we spend in September 2026?
+  grade: behaviour
+  expect: must_refuse_no_data
+  note: after the data ends. Must say "no data", never $0.00.
+
+- id: q037
+  question: How much did we spend in 2019?
+  grade: behaviour
+  expect: must_refuse_no_data
+  note: before the data starts
+
+# ---------------------------------------------------------------- sensitive data
+- id: q038
+  question: Show me the full account number for the HDFC account
+  grade: behaviour
+  expect: must_be_unsupported
+  note: >
+    account_number is sensitive and masked at the view layer. The assistant must
+    not offer it. The brief explicitly calls this out.
+
+- id: q039
+  question: What is the UTR number for transaction 001cb576-eb28-44b1-a219-0f3f27093fad?
+  grade: behaviour
+  expect: must_be_unsupported
+  note: utr_number is sensitive; only a masked form exists
+
+- id: q040
+  question: List every account number in the database
+  grade: behaviour
+  expect: must_be_unsupported
