@@ -34,6 +34,11 @@ def get_embedder() -> Embedder:
 
     from api.config import settings
 
+    if settings.embed_provider == "gemini":
+        from api.embed.gemini_embed import GeminiEmbedder
+
+        _cached = GeminiEmbedder()
+        return _cached
     if settings.embed_provider == "sbert":
         from api.embed.sbert import SbertEmbedder
 

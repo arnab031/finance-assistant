@@ -218,6 +218,14 @@ intent
                statement lines: banks, accounts and credit/debit transactions.
                It has NO vendors, categories, budgets, invoices, reconciliation
                status, employees, or chart of accounts.
+  smalltalk  - the message is not a question about the data at all: a greeting
+               ("hi", "good morning"), thanks, a sign-off, or a question about
+               you ("what can you do?", "who are you?"). Return intent
+               smalltalk and nothing else - the app writes the reply.
+
+  NEVER answer a greeting with unsupported. Unsupported means the data lacks a
+  kind of information, and telling someone who said "hi" that there is no vendor
+  master answers a question they did not ask.
 
   A DATE outside the data is NOT unsupported. "How much did we spend in 2019?"
   is an ordinary spend question - answer it with intent aggregate and the 2019
@@ -226,6 +234,18 @@ intent
 """
 
 FEWSHOT: list[tuple[str, dict]] = [
+    # First, because it is the first thing a real user types. The other fields
+    # are required by the schema and ignored by the smalltalk branch.
+    ("hi",
+     {"intent": "smalltalk", "metric": "debit_amount", "group_by": [],
+      "date_basis": "payment_date",
+      "reasoning": "a greeting, not a question about the data"}),
+
+    ("what can you do?",
+     {"intent": "smalltalk", "metric": "debit_amount", "group_by": [],
+      "date_basis": "payment_date",
+      "reasoning": "asking about the assistant, not about the transactions"}),
+
     ("How much did we spend in total?",
      {"intent": "aggregate", "metric": "debit_amount", "group_by": [],
       "date_basis": "payment_date",
@@ -434,6 +454,14 @@ PROFILE = Profile(
     # and no budget data: all true, none of it the reason. account_number and
     # utr_number are present and deliberately withheld, and the refusal should
     # say which of the two it is rather than imply the data is thin.
+    # Answers "hi" and "what can you do?" (api/smalltalk.py). It describes what
+    # this data DOES hold - the mirror image of unsupported_note, which names
+    # what it does not - because an opener is the wrong moment to list absences.
+    capability_note=(
+        "I answer questions about this bank statement data: spending, income, "
+        "net movement, individual transactions, and breakdowns by bank, account "
+        "or counterparty. Every answer comes with the SQL that produced it."
+    ),
     unsupported_note=(
         "That isn't answerable from this data. It holds bank statement lines — "
         "date, amount, credit or debit, bank, account, entity, program, and the "

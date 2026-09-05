@@ -72,6 +72,10 @@ class Answer:
     columns: list[str] = field(default_factory=list)
     rows: list[list[Any]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # The answer text itself. Needed because a conversational reply has no spec
+    # and no rows - grading intent alone cannot tell "hi" answered from "hi"
+    # declined, which is the bug must_greet exists to catch.
+    text: str = ""
     clarify_kind: str | None = None
     clarified: bool = False
     error: str | None = None
@@ -104,6 +108,8 @@ async def ask(client: httpx.AsyncClient, api: str, question: str) -> Answer:
                 a.spec = e["spec"]
             elif t == "rows":
                 a.columns, a.rows = e["columns"], e["rows"]
+            elif t == "token":
+                a.text += e["text"]
             elif t == "note":
                 a.notes.append(e["text"])
             elif t == "clarify":
@@ -238,6 +244,20 @@ def grade_behaviour(q: dict, a: Answer) -> Result:
             base.detail = "did not say the result was empty - a bare 0 reads as real"
         elif not filtered:
             base.detail = "no account filter in the spec; the answer was not scoped"
+
+    elif want == "must_greet":
+        # A greeting must be ANSWERED, not declined. Three conditions, because
+        # each failure mode this has actually had looks fine to the other two:
+        # the decline text (an "unsupported" lecture), a silent empty reply, and
+        # running a query for a message that asked for no data.
+        declined = intent == "unsupported" or "isn't answerable" in a.text.lower()
+        base.actual = (f"intent:{intent}" if intent else "no spec") + (
+            "/declined" if declined else "/answered")
+        base.passed = bool(a.text) and not declined and not a.rows
+        if declined:
+            base.detail = "declined a greeting as if it were a data question"
+        elif not a.text:
+            base.detail = "said nothing at all"
 
     elif want == "must_be_unsupported":
         base.actual = f"intent:{intent}" if intent else "no spec"

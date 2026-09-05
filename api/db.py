@@ -22,6 +22,7 @@ use INTERVAL arithmetic rather than DATE_FORMAT(x, '%Y-%m-01').
 from __future__ import annotations
 
 import json
+import logging
 import time
 import warnings
 from pathlib import Path
@@ -31,6 +32,8 @@ from urllib.parse import unquote, urlparse
 import aiomysql
 
 from api.config import settings
+
+log = logging.getLogger("tbx.db")
 
 SQL_DIR = Path(__file__).parent / "sql" / "mysql"
 
@@ -266,7 +269,16 @@ class Database:
         """
         applied: list[str] = []
         paths = sorted((SQL_DIR / "live").glob("*.sql")) + sorted(SQL_DIR.glob("*.sql"))
+        seeded = await self._already_populated()
         for path in paths:
+            # Seed data is for an EMPTY database only. INSERT IGNORE makes it
+            # re-runnable, not harmless: pointed at a real 4M-row export it
+            # silently added 10 transactions and 10 accounts, so every count,
+            # sum and eval baseline was off by a small unexplained amount. A
+            # migration that seeds must not fire against data it did not create.
+            if path.name == "003_sample_data.sql" and seeded:
+                log.info("skipping %s - `transaction` already holds rows", path.name)
+                continue
             for stmt in split_statements(path.read_text()):
                 # The constructs that make these migrations re-runnable -
                 # CREATE TABLE IF NOT EXISTS and INSERT IGNORE - each raise a
@@ -278,6 +290,18 @@ class Database:
                     await self.execute(stmt)
             applied.append(path.name)
         return applied
+
+    async def _already_populated(self) -> bool:
+        """True if `transaction` exists and holds at least one row.
+
+        LIMIT 1 rather than COUNT(*): this runs on every boot and the table it
+        asks about has millions of rows.
+        """
+        try:
+            return await self.scalar(
+                "SELECT 1 FROM `transaction` LIMIT 1") is not None
+        except Exception:  # noqa: BLE001 - first boot, table not created yet
+            return False
 
 
 db = Database()

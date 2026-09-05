@@ -16,6 +16,10 @@ __pycache__/
 
 # real secrets and local overrides; .env.example IS committed
 .env
+# a backup of .env holds the same live keys; .env.bak was sitting
+# untracked in the repo root, one `git add .` from being published
+.env.bak
+.env.local
 
 
 # ---------------------------------------------------------------------------

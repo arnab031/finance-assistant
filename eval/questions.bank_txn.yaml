@@ -348,3 +348,21 @@
   grade: behaviour
   expect: must_be_unsupported
 
+# ---------------------------------------------------------------- behaviour: conversation
+# Not every message is a query. These two failed for months: "hi" was answered
+# with the coverage decline - a paragraph about the absence of a vendor master,
+# in reply to a greeting. The canary could not see it, because it graded the
+# intent and the intent was a perfectly valid "unsupported".
+- id: q047
+  question: hi
+  grade: behaviour
+  expect: must_greet
+  note: >
+    Must be answered as a greeting and must run no query. api/smalltalk.py
+    handles this before extraction, so it also proves the short-circuit works.
+
+- id: q048
+  question: what can you do?
+  grade: behaviour
+  expect: must_greet
+  note: a question about the assistant, not about the data

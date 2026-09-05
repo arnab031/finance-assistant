@@ -85,6 +85,10 @@ def get_llm() -> LLM:
         from api.llm.anthropic import AnthropicLLM
 
         return AnthropicLLM()
+    if settings.llm_provider == "gemini":
+        from api.llm.gemini import GeminiLLM
+
+        return GeminiLLM()
     from api.llm.ollama import OllamaLLM
 
     return OllamaLLM()

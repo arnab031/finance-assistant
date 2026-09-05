@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     pool_max_size: int = 10
 
     # ---- language model (LLM call #1 and #2) ----
-    llm_provider: Literal["ollama", "anthropic"] = "ollama"
+    llm_provider: Literal["ollama", "anthropic", "gemini"] = "ollama"
     ollama_url: str = "http://localhost:11434"
     ollama_model: str = "qwen2.5:7b-instruct"
     ollama_keep_alive: str = "30m"          # avoids the measured ~9s cold reload
@@ -64,13 +64,48 @@ class Settings(BaseSettings):
             names.insert(0, self.ollama_model)
         return names
 
+    # Gemma served over the Gemini API. Only two Gemma ids are callable there:
+    # gemma-4-26b-a4b-it (26B total, 4B active MoE) and gemma-4-31b-it (dense).
+    # The Gemma 3 sizes (1B/4B/12B/27B) are downloadable weights only, so the
+    # MoE below is the smallest hosted option by active parameters.
+    gemini_api_key: str = ""
+    gemini_model: str = "gemma-4-26b-a4b-it"
+    gemini_timeout_s: int = 120
+
     # ---- embeddings (semantic entity resolution, Phase 8) ----
     # nomic-embed-text over sentence-transformers: zero extra dependency, and
     # cos("medical supplies", "Hospital: Clinic/Lab Supplies") = 0.841 vs
     # cos("medical supplies", "Debt Service") = 0.405 on the real vocabulary.
-    embed_provider: Literal["ollama", "sbert"] = "ollama"
+    embed_provider: Literal["ollama", "sbert", "gemini"] = "ollama"
     embed_model: str = "nomic-embed-text"
     embed_dim: int = 768
+
+    # ---- analytical replica (api/duck.py) ----
+    # DuckDB mirror of the MySQL data, rebuilt from it. Disposable by design:
+    # a full rebuild is ~23s, so it lives in /tmp and is never backed up.
+    # use_duckdb=False keeps every read on MySQL, which is the fallback if the
+    # replica cannot be built (no SELECT access, or the mysql extension is
+    # unavailable in a restricted environment).
+    use_duckdb: bool = False
+    duckdb_path: str = "/tmp/tbx_replica.duckdb"
+
+    # "auto"   - build when missing, refresh when the source has moved, else
+    #            reuse. The only setting that is correct on both the first boot
+    #            and the hundredth, which is why it is the default: a boolean
+    #            forces a choice between "always pay 2 minutes" and "silently
+    #            serve stale data", and both are wrong some of the time.
+    # "always" - rebuild unconditionally (after a schema change or a backfill).
+    # "never"  - reuse whatever is on disk; build only if there is nothing.
+    duckdb_refresh: Literal["auto", "always", "never"] = "auto"
+
+    # Monotonic column used to detect new rows and to append them without a
+    # full rebuild - an AUTO_INCREMENT id or equivalent. MAX() on it is an
+    # index-seek, so the staleness check is O(1) rather than a COUNT(*) that
+    # takes minutes on a table this size.
+    # Empty = no watermark: staleness falls back to an approximate row count and
+    # a change means a FULL rebuild, because without an ordering column there is
+    # no way to know which rows are new.
+    duckdb_watermark_column: str = ""
 
     # ---- feature flags ----
     enable_semantic: bool = False           # Phase 8. Ship off, enable when proven.
