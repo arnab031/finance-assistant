@@ -24,12 +24,14 @@ from api.compile import CompileError, compile_query
 from api.config import settings
 from api.crypto import assert_no_plaintext, placeholderise, resolve_rows
 from api.db import db, json_column
+from api.duck import reader
 from api.extract import ExtractionFailed, extract
 from api.llm.ollama import ModelUnavailable
 from api.narrate import narrate, template_answer
 from api.observability import RequestTrace, jsonable, new_thread_id
 from api.profiles.base import get_profile
 from api.resolve.ambiguity import AmbiguityResolver
+from api.smalltalk import reply as smalltalk_reply, text_for as smalltalk_text
 from api.schema import (
     AskRequest,
     ClarifyRequest,
@@ -118,6 +120,19 @@ async def _pipeline(body: AskRequest, request: Request) -> AsyncIterator[str]:
     yield frame(ThreadEvent(thread_id=trace.thread_id))
 
     try:
+        # ---- 0. not a question about the data ---------------------------
+        # Deterministic, and BEFORE extraction: "hi" is the cheapest turn there
+        # is and should not cost a model call, and the answer to it cannot
+        # regress when the model changes. api/smalltalk.py matches whole
+        # utterances only, so a question that merely opens politely is untouched.
+        chat = smalltalk_reply(body.question, get_profile())
+        if chat:
+            yield frame(StageEvent(stage="explaining"))
+            trace.narration = chat
+            yield frame(TokenEvent(text=chat))
+            yield frame(_done(trace, "high"))
+            return
+
         # ---- 1. understand (LLM call #1) --------------------------------
         yield frame(StageEvent(stage="understanding"))
         spec, llm_result = await extract(body.question, llm, reg)
@@ -134,6 +149,16 @@ async def _pipeline(body: AskRequest, request: Request) -> AsyncIterator[str]:
 
         # ---- 2. check ---------------------------------------------------
         yield frame(StageEvent(stage="checking"))
+
+        if spec.intent == "smalltalk":
+            # The model saw a conversational turn that layer 0 did not match
+            # ("yo, hope your day is going well"). Same reply, one branch later.
+            text = smalltalk_text("greeting", get_profile())
+            trace.narration = text
+            yield frame(StageEvent(stage="explaining"))
+            yield frame(TokenEvent(text=text))
+            yield frame(_done(trace, "high"))
+            return
 
         if spec.intent == "unsupported":
             # Read from the ACTIVE PROFILE. This was hardcoded to the
@@ -171,7 +196,7 @@ async def _pipeline(body: AskRequest, request: Request) -> AsyncIterator[str]:
                 yield frame(NoteEvent(kind="coverage", text=text))
 
         # ---- 3. ambiguity: detect -> probe -> decide ---------------------
-        resolver = AmbiguityResolver(db, reg)
+        resolver = AmbiguityResolver(reader(), reg)
         decision = await resolver.resolve(
             spec, body.question, settled=await _load_settled(trace.thread_id))
         before = spec
@@ -339,7 +364,9 @@ async def _execute(spec, reg, trace: RequestTrace, llm, question: str) -> AsyncI
     trace.sql = cq.sql
     yield frame(SqlEvent(sql=cq.sql, params=jsonable(cq.params)))
 
-    columns, raw_rows, sql_ms = await db.fetch_timed(cq.sql, cq.params)
+    # Reads go to the replica when enabled; the write in the finally block
+    # below still uses `db`, because MySQL remains the system of record.
+    columns, raw_rows, sql_ms = await reader().fetch_timed(cq.sql, cq.params)
 
     # An ungrouped aggregate over NOTHING still returns one row - (NULL, 0) -
     # so every `if not rows` check in this codebase is blind to it, and the

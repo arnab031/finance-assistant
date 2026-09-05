@@ -48,6 +48,13 @@ Intent = Literal[
     "anomaly",      # outliers vs a vendor's own history
     "clarify",      # ambiguous - ask before computing
     "unsupported",  # not answerable from this schema
+    # Not a question about the data at all: a greeting, thanks, a sign-off, or a
+    # question about the assistant itself. Separate from "unsupported" because
+    # they are different failures - unsupported says the data lacks a KIND of
+    # information, which is a bewildering thing to be told in reply to "hi".
+    # Most of these never reach the model (api/smalltalk.py); this value exists
+    # for the ones that do.
+    "smalltalk",
 ]
 
 DateBasis = Literal["payment_date", "fiscal_year"]
@@ -221,7 +228,8 @@ class QuerySpec(BaseModel):
                 ]
             self.period = None
             self.compare_period = None
-            if self.intent not in ("clarify", "unsupported") and not self.fiscal_year:
+            if self.intent not in ("clarify", "unsupported", "smalltalk") \
+                    and not self.fiscal_year:
                 raise ValueError("date_basis='fiscal_year' requires fiscal_year")
         else:
             if (self.fiscal_year or self.compare_fiscal_year) and not lenient:

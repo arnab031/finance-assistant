@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from api.config import settings
 from api.db import db, json_column
+from api.duck import duck
 from api.llm.base import close_model_clients, get_llm
 from api.narration import ensure_counterparty
 from api.registry import SemanticRegistry
@@ -38,6 +39,22 @@ async def lifespan(app: FastAPI):
     app.state.semantic = await ensure_semantic_index(db)
     for kind, outcome in app.state.semantic.items():
         log.info("semantic index[%s]: %s", kind, outcome)
+
+    # Analytical replica. Built AFTER ensure_counterparty so it copies the
+    # finished column, and after migrations so v_txn's source columns exist.
+    # A failure here is downgraded, never fatal: the replica is an optimisation,
+    # and falling back to MySQL gives slow correct answers rather than none.
+    if settings.use_duckdb:
+        try:
+            await duck.connect()
+            info = await duck.ensure_built()
+            log.info("duck replica: %s (%s)%s", info["action"],
+                     info.get("reason", settings.duckdb_path),
+                     f" - {info['counts']['transaction']:,} rows in "
+                     f"{info['build_ms']}ms" if "build_ms" in info else "")
+        except Exception as exc:  # noqa: BLE001
+            log.exception("duck replica unavailable, falling back to MySQL: %s", exc)
+            settings.use_duckdb = False
 
     app.state.registry = await SemanticRegistry.build(db)
     app.state.pending = {}   # ambiguity_id -> Ambiguity, awaiting a choice
@@ -251,17 +268,51 @@ async def health() -> JSONResponse:
     except Exception as exc:  # noqa: BLE001
         checks["semantic_index"] = {"ok": False, "error": str(exc)}
 
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"{settings.ollama_url}/api/tags")
-            names = [m["name"] for m in r.json().get("models", [])]
-        checks["ollama"] = {
-            "ok": settings.ollama_model in names,
-            "models": names,
-            "want": settings.ollama_model,
-        }
-    except Exception as exc:  # noqa: BLE001
-        checks["ollama"] = {"ok": False, "error": str(exc)}
+    # Probe whatever provider is CONFIGURED, not Ollama unconditionally. The
+    # hardcoded version reported ollama:false - and therefore overall ok:false,
+    # a 503 - while the app was serving correctly on Gemini, which is exactly
+    # backwards for a check whose job is to say whether the app works.
+    checks["llm"] = await _check_llm()
 
     ok = all(isinstance(c, dict) and c.get("ok") for c in checks.values())
     return JSONResponse({"ok": ok, "checks": checks}, status_code=200 if ok else 503)
+
+
+async def _check_llm() -> dict:
+    """Liveness for the configured LLM provider.
+
+    Each branch verifies the specific thing that actually fails for that
+    provider: Ollama silently serves a model that was never pulled, so the check
+    is presence in /api/tags; a hosted provider fails on credentials or an
+    unknown model id, so the check is a real (tiny) generation call.
+    """
+    provider = settings.llm_provider
+    try:
+        if provider == "ollama":
+            async with httpx.AsyncClient(timeout=5) as client:
+                r = await client.get(f"{settings.ollama_url}/api/tags")
+                names = [m["name"] for m in r.json().get("models", [])]
+            return {"ok": settings.ollama_model in names, "provider": provider,
+                    "want": settings.ollama_model, "models": names}
+
+        if provider == "gemini":
+            if not settings.gemini_api_key:
+                return {"ok": False, "provider": provider,
+                        "error": "GEMINI_API_KEY is empty"}
+            # Cheapest call that proves key + model id + reachability at once.
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.post(
+                    f"https://generativelanguage.googleapis.com/v1beta"
+                    f"/models/{settings.gemini_model}:generateContent",
+                    headers={"x-goog-api-key": settings.gemini_api_key},
+                    json={"contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                          "generationConfig": {"maxOutputTokens": 1}},
+                )
+            return {"ok": r.status_code == 200, "provider": provider,
+                    "model": settings.gemini_model,
+                    **({} if r.status_code == 200
+                       else {"error": f"HTTP {r.status_code}: {r.text[:200]}"})}
+
+        return {"ok": True, "provider": provider, "note": "no probe implemented"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "provider": provider, "error": str(exc)}

@@ -135,6 +135,13 @@ class Profile:
     fewshot: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     unsupported_note: str = ""
 
+    # One sentence saying what this dataset can answer, in the first person.
+    # Used by api/smalltalk.py to reply to "hi" and "what can you do?". It lives
+    # here for the same reason unsupported_note does: hardcoding "I can tell you
+    # about vendors and departments" would describe a different database the
+    # moment the profile changes, and the canary grades intents, not prose.
+    capability_note: str = ""
+
     # ---- optional intents this dataset cannot support ----
     disabled_intents: frozenset[str] = frozenset()
 

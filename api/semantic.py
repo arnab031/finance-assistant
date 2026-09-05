@@ -135,7 +135,7 @@ async def _sync_labels(db: Database, source: SemanticSource) -> None:
 
 async def _embed_missing(db: Database, entity_type: str) -> int:
     """Embed only the rows that have no vector. Returns how many were written."""
-    from api.embed.ollama_embed import OllamaEmbedder
+    from api.embed.base import get_embedder
 
     rows = await db.fetch(
         """SELECT id, label FROM semantic_index
@@ -146,7 +146,7 @@ async def _embed_missing(db: Database, entity_type: str) -> int:
     if not rows:
         return 0
 
-    embedder = OllamaEmbedder()
+    embedder = get_embedder()
     try:
         vectors = await embedder.encode([r["label"] for r in rows])
     finally:
@@ -272,9 +272,9 @@ async def search(
                         "score in Python", entity_type, MAX_LABELS)
         return []
 
-    from api.embed.ollama_embed import OllamaEmbedder
+    from api.embed.base import get_embedder
 
-    embedder = OllamaEmbedder()
+    embedder = get_embedder()
     try:
         qvec = (await embedder.encode([query]))[0]
     except Exception as exc:  # noqa: BLE001

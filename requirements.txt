@@ -64,6 +64,10 @@ uvloop==0.22.1
 watchfiles==1.2.0
 websockets==17.1
 
+# Analytical read replica (api/duck.py). Columnar engine for the aggregate
+# path; MySQL stays the system of record. Includes the mysql scanner extension.
+duckdb==1.5.5
+
 # ---------------------------------------------------------------------------
 # DELIBERATELY NOT PINNED
 #

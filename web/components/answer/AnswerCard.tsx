@@ -33,6 +33,17 @@ export default function AnswerCard({
   const coverageNotes = msg.notes.filter((n) => n.kind === "coverage");
   const assumptions = msg.notes.filter((n) => n.kind !== "coverage");
 
+  // A conversational reply - a greeting, or "what can you do?" - has no rows,
+  // no spec and no measurable time, so every child of the meta row hides itself
+  // and the row rendered as 10px of empty space under the text. Ask whether
+  // there is anything to show rather than whether an answer happened.
+  const hasMeta = Boolean(
+    msg.verified
+    || assumptions.length > 0
+    || (msg.timing && msg.timing.total > 0)
+    || (msg.confidence && msg.confidence !== "high"),
+  );
+
   return (
     <div className="answer">
       {msg.error && <p className="answer-error">{msg.error}</p>}
@@ -55,7 +66,7 @@ export default function AnswerCard({
 
       {msg.narration && <p className="answer-text">{msg.narration}</p>}
 
-      {(msg.verified || assumptions.length > 0 || msg.timing) && (
+      {hasMeta && (
         <div className="answer-meta">
           {msg.verified && <VerifiedBadge verified={msg.verified} />}
           {msg.timing && msg.timing.total > 0 && (

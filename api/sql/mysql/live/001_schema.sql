@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS `transaction` (
     transaction_amount       DECIMAL(15,2) NOT NULL DEFAULT 0.00,
     transaction_reference_id VARCHAR(64),            -- plaintext, searchable
     utr_number               VARCHAR(256),           -- SENSITIVE: arrives encrypted
-    -- Derived from `description` by scripts/10_counterparty.py. This schema has
+    -- Derived from `description` by ensure_counterparty() in api/narration.py,
+    -- which runs at boot before the server accepts traffic. This schema has
     -- no vendor table, so without this column "who did we pay?" has no answer:
     -- every merchant and payee name is buried in free-text narration.
     counterparty             VARCHAR(255),
