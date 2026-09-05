@@ -21,6 +21,7 @@ use INTERVAL arithmetic rather than DATE_FORMAT(x, '%Y-%m-01').
 
 from __future__ import annotations
 
+import json
 import time
 import warnings
 from pathlib import Path
@@ -32,6 +33,36 @@ import aiomysql
 from api.config import settings
 
 SQL_DIR = Path(__file__).parent / "sql" / "mysql"
+
+
+def json_column(value: Any, default: Any = None) -> Any:
+    """Parse a JSON column. PyMySQL hands one back as TEXT.
+
+    psycopg decoded JSONB into a dict or list before the value ever reached
+    application code, so every read site here was written assuming that. MySQL
+    returns the raw string, and the failures are ugly rather than obvious:
+
+      settled.get(...)          -> AttributeError: 'str' object has no attribute 'get'
+      set(spec) | set(new)      -> a set of CHARACTERS, silently, then AttributeError
+      "{}" or {}                -> "{}", because a non-empty string is truthy, so
+                                   the usual `or {}` fallback never fires
+
+    Applied explicitly at each read rather than blanket-decoding every string
+    column, because nothing in the result set says which columns are JSON and
+    guessing would corrupt ordinary text that happens to start with a brace.
+    """
+    if value is None:
+        return default
+    if isinstance(value, (dict, list)):
+        return value                     # already decoded (or a future driver)
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", "replace")
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            return default
+    return default
 
 
 def _args(params: dict | None) -> tuple:

@@ -3,7 +3,7 @@ import type { Stage } from "./Chat";
 const STAGES: { key: Stage; label: string }[] = [
   { key: "understanding", label: "Understanding the question" },
   { key: "checking", label: "Checking coverage and ambiguity" },
-  { key: "querying", label: "Querying Postgres" },
+  { key: "querying", label: "Querying the ledger" },
   { key: "explaining", label: "Writing the answer" },
 ];
 

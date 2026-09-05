@@ -95,6 +95,11 @@ class Filters(BaseModel):
     transaction_type: list[str] = Field(default_factory=list)
     banks: list[str] = Field(default_factory=list)
     account_ids: list[str] = Field(default_factory=list)
+    # The account NUMBER, which is not account_id: the id is an internal UUID,
+    # the number is what a person reads off a statement and types into the box.
+    # Filtering by one is not a disclosure - the value came FROM the asker - so
+    # this is deliberately answerable while displaying a full number is not.
+    account_numbers: list[str] = Field(default_factory=list)
     entity_ids: list[str] = Field(default_factory=list)
     reference_id: list[str] = Field(default_factory=list)
 
@@ -420,6 +425,15 @@ class DoneEvent(BaseModel):
     type: Literal["done"] = "done"
     message_id: str
     confidence: Literal["high", "medium", "low"]
+    # What the answer cost, in the pipeline's own measure. The breakdown table
+    # already shows sql_ms, but that is the DATABASE step alone - single-digit
+    # milliseconds - while the wait a person actually experiences is the two
+    # model calls around it. Showing only the fast number invites the reader to
+    # think the system is instant and something else is slow.
+    total_ms: int = 0
+    extract_ms: int = 0      # LLM call #1: question -> typed spec
+    sql_ms: int = 0          # the database
+    narrate_ms: int = 0      # LLM call #2, including verification and any retry
 
 
 class ErrorEvent(BaseModel):
@@ -444,12 +458,18 @@ Event = Annotated[
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     thread_id: str | None = None
+    # Which model answers THIS question. Absent means the configured default.
+    # Validated against EVAL_MODELS server-side, so the field cannot be used to
+    # make the daemon reach for an arbitrary name.
+    model: str | None = None
 
 
 class ClarifyRequest(BaseModel):
     thread_id: str
     ambiguity_id: str
     chosen_key: str
+    # Carried so resolving an ambiguity continues on the model that raised it.
+    model: str | None = None
 
 
 class Coverage(BaseModel):

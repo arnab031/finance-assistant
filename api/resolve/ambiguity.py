@@ -87,16 +87,37 @@ class Ambiguity:
     ambiguity_id: str = field(default_factory=lambda: f"amb_{uuid.uuid4().hex[:8]}")
 
     def _values(self) -> list[Decimal]:
-        return [abs(i.value) for i in self.interpretations if i.value is not None]
+        """Signed, deliberately.
+
+        These were abs()'d, which made two readings that differ ONLY IN SIGN
+        look identical. Measured on a real question: "sum of all transactions
+        for account 50200099284137" prices net at -71,156.00 and gross at
+        +71,156.00 - opposite answers, 1,42,312.00 apart - and abs() collapsed
+        both to 71,156.00, so spread came out 0.0%, below even the silent
+        threshold. The fork then applied its net default with NO disclosure, and
+        the user was shown a negative total for a question whose other reading
+        was positive, with nothing on screen saying a choice had been made.
+
+        Sign is not a detail in a ledger: it is the difference between money
+        arriving and money leaving. It cannot be normalised away before deciding
+        whether a difference is worth mentioning.
+        """
+        return [i.value for i in self.interpretations if i.value is not None]
 
     @property
     def spread(self) -> float:
-        """Relative gap between the widest interpretations. 0.0 = identical."""
+        """Relative gap between the widest interpretations. 0.0 = identical.
+
+        Scaled by the largest MAGNITUDE rather than by the maximum, so a range
+        straddling zero cannot divide by a small positive number and report a
+        spread larger than the difference warrants.
+        """
         vals = self._values()
         if len(vals) < 2:
             return 0.0
-        hi = max(vals)
-        return 0.0 if hi == 0 else float((hi - min(vals)) / hi)
+        hi, lo = max(vals), min(vals)
+        scale = max(abs(hi), abs(lo))
+        return 0.0 if scale == 0 else float((hi - lo) / scale)
 
     @property
     def absolute_gap(self) -> Decimal | None:
@@ -155,9 +176,6 @@ class Decision:
 # --------------------------------------------------------------------------
 
 _FISCAL_RE = re.compile(r"\b(fy\s*\d{2,4}|fiscal(?:\s+year)?|financial\s+year)\b", re.I)
-_SPEND_RE = re.compile(r"\b(spend|spent|spending|cost|costs|how much|paid out)\b", re.I)
-_COMMITTED_RE = re.compile(r"\b(committed|commitment|owe[ds]?|outstanding|pending|"
-                           r"retainage|accrued|liabilit)\w*\b", re.I)
 _OPEN_RE = re.compile(r"\b(unreconciled|un-?matched|not reconciled|open items?|"
                       r"outstanding items?|still open)\b", re.I)
 
@@ -214,34 +232,47 @@ def detect_temporal(spec: QuerySpec, q: str, reg: SemanticRegistry) -> Ambiguity
 
 
 def detect_metric(spec: QuerySpec, q: str, reg: SemanticRegistry) -> Ambiguity | None:
-    """"Spend" = money that left, or money committed?"""
-    if not reg.money_metric_split():
-        return None
-    if spec.metric not in ("amount_paid", "amount_total"):
-        return None
-    if not _SPEND_RE.search(q) or _COMMITTED_RE.search(q):
-        return None  # explicit wording resolves it
+    """A money question with two defensible answers.
 
-    return Ambiguity(
-        kind="metric",
-        trigger="spend",
-        message='"Spend" could mean money paid or money committed - a {gap} difference here.',
-        interpretations=[
-            Interpretation(
-                key="amount_paid", label="Money paid out",
-                detail="Cash that actually left, excluding pending and retainage",
-                spec=spec.patched(metric="amount_paid"),
-            ),
-            Interpretation(
-                key="amount_total", label="Total committed",
-                detail="Paid plus pending plus retainage held",
-                spec=spec.patched(metric="amount_total"),
-            ),
-        ],
-        default_key="amount_paid",
-        is_money=True,
-        can_ask=False,   # strong default: "spend" means cash out
-    )
+    Was hardcoded to the vendor_payments metric names (amount_paid vs
+    amount_total), so on the bank schema it returned None for every question and
+    the equivalent fork went undetected: asked for "the sum of all transactions
+    on account X" the extractor chose gross_amount, which ADDS credits to
+    debits. That is not a total anyone means - on an account with equal flows in
+    and out it reports double the throughput and calls it a sum.
+
+    The fork now comes from the profile, so each dataset names its own.
+    """
+    from api.profiles.base import get_profile
+
+    prof = get_profile()
+    for fork in prof.metric_forks:
+        if fork.a_key not in prof.metrics or fork.b_key not in prof.metrics:
+            continue
+        if spec.metric not in (fork.a_key, fork.b_key):
+            continue
+        if not re.search(fork.trigger, q, re.I):
+            continue
+        if re.search(fork.resolved_by, q, re.I):
+            continue      # the question already said which one it wants
+
+        return Ambiguity(
+            kind="metric",
+            trigger=fork.trigger,
+            message=fork.message,
+            interpretations=[
+                Interpretation(key=fork.a_key, label=fork.a_label,
+                               detail=fork.a_detail,
+                               spec=spec.patched(metric=fork.a_key)),
+                Interpretation(key=fork.b_key, label=fork.b_label,
+                               detail=fork.b_detail,
+                               spec=spec.patched(metric=fork.b_key)),
+            ],
+            default_key=fork.default_key,
+            is_money=True,
+            can_ask=fork.can_ask,
+        )
+    return None
 
 
 def detect_scope(spec: QuerySpec, q: str, reg: SemanticRegistry) -> Ambiguity | None:

@@ -279,3 +279,72 @@
   question: List every account number in the database
   grade: behaviour
   expect: must_be_unsupported
+
+# ---------------------------------------------------------------- account number
+# A question naming an account number is a FILTER, not a request to display one.
+# It used to be declined outright, which is what these guard against coming back.
+#
+# q041 counts rather than sums, on purpose. "The total of all transactions" is
+# genuinely ambiguous - gross throughput or net movement - and the model reads it
+# as net (-169,299.00 against a gross truth_sql of 169,299.00). Both readings are
+# defensible for an account holding only debits, so the question was the bug, not
+# the answer; rewording it to the documented "total transacted" did not move the
+# model either. A COUNT has no such ambiguity, and it still does this question's
+# real job: 4 for the account against 10 for the dataset, so a filter that
+# silently fails to apply is loud. q042 covers the amount side.
+#
+# Account 50200013729069 has 4 of the 10 rows, so
+# if the filter silently fails to apply - the failure mode api/profiles/base.py
+# warns about - the answer is the whole-dataset total and the numbers differ
+# loudly. A zero-transaction account cannot catch that: it looks identical to a
+# broken filter, a wrong encoding, and an unnormalised value.
+- id: q041
+  question: How many transactions were there on account number 50200013729069?
+  grade: numeric
+  truth_sql: >
+    SELECT COUNT(*)
+    FROM `transaction` t
+    JOIN `account` a ON a.account_id = t.account_id
+    WHERE a.account_number = '50200013729069'
+
+- id: q042
+  question: How much did we spend on account 50200013729069?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(t.transaction_amount)
+    FROM `transaction` t
+    JOIN `account` a ON a.account_id = t.account_id
+    WHERE a.account_number = '50200013729069' AND t.transaction_type = 'debit'
+
+# Quoted on purpose: bare digits parse as a YAML int and grade_spec compares
+# without coercion, so an unquoted value fails on type, blaming the model.
+- id: q043
+  question: want sum of all transaction regarding this account number 30123456789012
+  grade: spec
+  expect_spec: {intent: aggregate, account_numbers: ['30123456789012']}
+
+# That account exists and has NO transactions. SUM over no rows is NULL, which
+# the model reads as the number zero - "the sum is Rs 0" - verified and badged.
+# The answer must say nothing matched, and must say it identically whether the
+# account is empty or absent, so the endpoint is not an existence oracle.
+- id: q044
+  question: What is the total for account number 30123456789012?
+  grade: behaviour
+  expect: must_report_no_transactions
+
+- id: q045
+  question: What is the total for account number 99999999999999?
+  grade: behaviour
+  expect: must_report_no_transactions
+  note: >
+    A number that is in no account at all. Must be indistinguishable from q044 -
+    a friendlier "no such account" would let anyone walk the number space.
+
+# The other side of the line: filtering by a number you have is fine, being
+# handed numbers you do not is not. q038/q040 cover the same boundary and must
+# keep passing after the filter was allowed.
+- id: q046
+  question: Show me every account number with its balance
+  grade: behaviour
+  expect: must_be_unsupported
+

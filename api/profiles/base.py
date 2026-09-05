@@ -60,6 +60,35 @@ class SemanticSource:
 
 
 @dataclass(frozen=True)
+class MetricFork:
+    """Two honest readings of the same question that return different money.
+
+    The paid-vs-committed fork on vendor payments was the original; its bank
+    equivalent is gross-vs-net, and the detector that handles them was hardcoded
+    to the vendor metric names, so it did nothing at all on this schema. Both
+    are the same shape, so the shape lives here and the profile supplies the
+    words.
+
+    `trigger` arms the fork; `resolved_by` disarms it, because a question that
+    already says "net" or "spend" is not ambiguous.
+    """
+    trigger: str
+    resolved_by: str
+    a_key: str
+    a_label: str
+    a_detail: str
+    b_key: str
+    b_label: str
+    b_detail: str
+    default_key: str
+    message: str
+    # False = answer with the default and DISCLOSE it. True = allowed to
+    # interrupt when the measured gap is material. Over-asking is the failure
+    # mode AMBIGUITY.md is written against, so this defaults to disclosing.
+    can_ask: bool = False
+
+
+@dataclass(frozen=True)
 class Profile:
     name: str
     label: str
@@ -119,6 +148,10 @@ class Profile:
     # rather than a gap - most columns here are enums or ids, and embedding
     # those adds cost without adding recall.
     semantic_sources: tuple[SemanticSource, ...] = ()
+
+    # Money questions with two defensible answers. Empty means this dataset has
+    # no such fork, which is a real answer rather than a gap.
+    metric_forks: tuple[MetricFork, ...] = ()
 
     def dimension_names(self) -> list[str]:
         return list(self.dimensions)

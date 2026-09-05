@@ -11,6 +11,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _DEFAULT_DSN = "mysql://tbx:tbx@127.0.0.1:3306/tbx_live"
 
 
+def _csv(value: str) -> list[str]:
+    """'a, b' -> ['a', 'b'], dropping blanks left by a trailing comma."""
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -39,6 +44,25 @@ class Settings(BaseSettings):
     ollama_keep_alive: str = "30m"          # avoids the measured ~9s cold reload
     ollama_timeout_s: int = 120
     anthropic_model: str = "claude-haiku-4-5"
+
+    # Models the /ops canary offers, in this order. Declared rather than
+    # discovered: the scorecard compares MODELS, and which ones we measure is a
+    # decision, not an accident of what happens to be pulled on the box. Leave
+    # empty to fall back to offering everything Ollama has.
+    #
+    # Comma-separated, because .env is edited by hand and a JSON array is not.
+    # ollama_model stays the default the app answers chat with; this only
+    # widens what a canary run can target.
+    eval_models: str = ""
+
+    @property
+    def eval_model_names(self) -> list[str]:
+        """EVAL_MODELS as a list, always including the configured default so the
+        model actually serving chat can never drop out of the picker."""
+        names = _csv(self.eval_models)
+        if self.ollama_model not in names:
+            names.insert(0, self.ollama_model)
+        return names
 
     # ---- embeddings (semantic entity resolution, Phase 8) ----
     # nomic-embed-text over sentence-transformers: zero extra dependency, and

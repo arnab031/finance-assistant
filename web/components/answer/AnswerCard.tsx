@@ -9,6 +9,12 @@ import VerifiedBadge from "./VerifiedBadge";
 
 // The label is set by the pipeline from what it measured, not by the model.
 // Saying which measurement keeps "medium" from reading as an unexplained shrug.
+/** 940 -> "0.9s", 6395 -> "6.4s". Seconds throughout: the number people care
+ *  about here is whole seconds of waiting, and "6395 ms" makes them count digits. */
+export function seconds(ms: number): string {
+  return ms >= 100 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+}
+
 const CONFIDENCE_HINT: Record<string, string> = {
   high: "Every figure was traced back to a row in the query result.",
   medium: "Figures check out, but the answer fell back to a generated summary "
@@ -49,9 +55,19 @@ export default function AnswerCard({
 
       {msg.narration && <p className="answer-text">{msg.narration}</p>}
 
-      {(msg.verified || assumptions.length > 0) && (
+      {(msg.verified || assumptions.length > 0 || msg.timing) && (
         <div className="answer-meta">
           {msg.verified && <VerifiedBadge verified={msg.verified} />}
+          {msg.timing && msg.timing.total > 0 && (
+            <span
+              className="answer-timing"
+              title={`Understanding the question ${seconds(msg.timing.extract)}`
+                   + ` · database ${seconds(msg.timing.sql)}`
+                   + ` · writing the answer ${seconds(msg.timing.narrate)}`}
+            >
+              Answered in {seconds(msg.timing.total)}
+            </span>
+          )}
           {msg.confidence && msg.confidence !== "high" && (
             <span className={`badge badge-${msg.confidence}`}>
               {msg.confidence} confidence
@@ -74,6 +90,7 @@ export default function AnswerCard({
         sql={msg.sql}
         rowCount={msg.rows?.row_count}
         elapsedMs={msg.rows?.elapsed_ms}
+        timing={msg.timing}
       />
     </div>
   );

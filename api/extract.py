@@ -181,8 +181,23 @@ def _strip_invented_period(spec: QuerySpec, question: str) -> QuerySpec:
 
     An invented narrowing is worse than an invented widening: the number looks
     plausible, so nothing about the answer signals that a filter was applied.
+
+    A GROUP-BY IS NOT A TIME REFERENCE. "Break down spending by month" contains
+    the word "month", which _TEMPORAL_RE matches, so this guard used to bail out
+    and let an invented window through - measured, the model answered with
+    period "2026 to date", silently dropping December 2025 and 9,241.00 from a
+    total the question asked to be complete. The word names the axis to group
+    ON, not a window to filter BY: the axis is already in spec.group_by, so a
+    temporal token that is only a requested dimension is discounted here. Any
+    real anchor ("last month", "in June", "2026") still matches and still
+    protects a genuine period.
     """
-    if spec.period is None or _TEMPORAL_RE.search(question):
+    if spec.period is None:
+        return spec
+
+    anchors = [m.group(0).lower() for m in _TEMPORAL_RE.finditer(question)]
+    grouped = {d.lower() for d in spec.group_by}
+    if [a for a in anchors if a not in grouped]:
         return spec
 
     log.info("dropped invented period %r (question has no time reference)",
@@ -250,6 +265,123 @@ def _set_bound_strictness(spec: QuerySpec, question: str) -> QuerySpec:
     )
 
 
+_ACCT_DIGITS = re.compile(r"\d[\d\s-]{7,}\d")
+# Recovery only fires when the question actually says "account". Two bare dates
+# sitting side by side ("between 2025-12-03 2026-06-24") are 16 digits under the
+# pattern above, and injecting those as an account filter would answer zero for
+# a question that has a real total - a wrong number, not an error.
+_ACCT_WORD = re.compile(r"\ba/?c\b|\baccounts?\b|\bacct\b", re.I)
+
+
+_MAX_ACCOUNTS = 5
+
+
+def _has_account_digits(question: str) -> list[str]:
+    """Digit runs in the question that could be an account number, normalised.
+
+    A date range or an amount can also be a long digit run, so the length bound
+    does the discriminating: "2026-06-24" reduces to 8 digits and is rejected.
+    """
+    found = [re.sub(r"\D", "", m.group(0)) for m in _ACCT_DIGITS.finditer(question)]
+    return [d for d in found if 9 <= len(d) <= 20]
+
+
+def _normalise_account_numbers(spec: QuerySpec, question: str) -> QuerySpec:
+    """Reduce an account number to digits, and recover one the model dropped.
+
+    Two failures this prevents, both of which end in a WRONG NUMBER rather than
+    an error. People write account numbers the way they read them - "A/C
+    3012 3456 7890 12", "30123456789012." at the end of a sentence - and the
+    stored column is bare digits, so an unnormalised filter matches nothing and
+    the answer is a confident zero for an account that has activity.
+
+    Worse is the second case: the model puts the digits in the WRONG field, or
+    omits them entirely while still answering `aggregate`. The filter then never
+    applies and the reply is the whole dataset's total presented as one
+    account's - the silent-unfiltered failure api/profiles/base.py:Filt warns
+    about. So when the question plainly contains an account number and no
+    account filter survived extraction, it is put back here.
+    """
+    from api.profiles.base import get_profile
+
+    if "account_numbers" not in get_profile().filters:
+        return spec
+
+    digits = _has_account_digits(question)
+
+    cleaned = [re.sub(r"\D", "", v) for v in spec.filters.account_numbers]
+    cleaned = [v for v in cleaned if v]
+
+    # PROVENANCE. A value may only be filtered on if its digits are in the
+    # question the user just asked. The few-shot carries an account number, the
+    # model can hallucinate one, and text quoted inside a question could smuggle
+    # one in - each would silently answer about an account nobody named. Both
+    # sides are compared digits-only, so "3012 3456 7890 12" still matches.
+    invented = [v for v in cleaned if v not in digits]
+    if invented:
+        log.info("dropping account number(s) %s not present in the question", invented)
+    cleaned = [v for v in cleaned if v in digits]
+
+    # A cap, because a list filter has no maxItems the decoder reliably honours.
+    # One request carrying fifty candidate numbers alongside group_by "account"
+    # would return a labelled row per hit - batch existence probing, where a
+    # single guess is sealed by v_txn's inner join.
+    if len(cleaned) > _MAX_ACCOUNTS:
+        log.info("capping %d account numbers at %d", len(cleaned), _MAX_ACCOUNTS)
+        cleaned = cleaned[:_MAX_ACCOUNTS]
+
+    if not cleaned and digits and spec.intent != "unsupported" \
+            and _ACCT_WORD.search(question):
+        log.info("recovering account number(s) %s the model dropped", digits)
+        cleaned = digits
+    if cleaned == list(spec.filters.account_numbers):
+        return spec
+    return spec.patched(
+        filters=spec.filters.model_copy(
+            update={"account_numbers": cleaned}
+        ).model_dump(),
+    )
+
+
+# "account number" as the THING being asked for, with no number supplied.
+_ACCT_DISCLOSE = re.compile(
+    r"\b(show|list|display|print|reveal|tell me|give me|what(?:'s| is| are)?|which)\b"
+    r"[^?]{0,60}\baccount\s*(?:number|no\.?|nos\.?)s?\b",
+    re.I,
+)
+
+
+def _refuse_account_number_disclosure(spec: QuerySpec, question: str) -> QuerySpec:
+    """Filtering by a number the asker already has is fine. Handing them numbers
+    they do not is not, and that line is now enforced here rather than trusted
+    to the model.
+
+    The prompt used to refuse every question containing "account number", which
+    is why a plain filtered sum was declined. Loosening it to allow filtering
+    also loosens it for display - and prof.list_columns selects t.account_number
+    while resolve_rows() hands the USER the real value, so an intent=list answer
+    prints full account numbers in the breakdown table. Only the model's own
+    judgement stood between "list every account number" and that table.
+
+    The test is possession: a question naming account numbers WITHOUT supplying
+    one is asking to be given them. With one, the value came from the asker and
+    filtering by it discloses nothing.
+    """
+    if not _ACCT_DISCLOSE.search(question):
+        return spec
+    if spec.filters.account_numbers or _has_account_digits(question):
+        return spec
+
+    reason = ("Account numbers are masked and cannot be listed or shown in "
+              "full. Ask about a specific account by its number and that is "
+              "answerable.")
+    if spec.intent == "unsupported":
+        return spec.patched(reasoning=reason)
+    log.info("refusing account-number disclosure: %r", question)
+    return spec.patched(intent="unsupported", reasoning=reason,
+                        ambiguities=[*spec.ambiguities, reason])
+
+
 def _force_unsupported_for_absent_concepts(
     spec: QuerySpec, question: str
 ) -> QuerySpec:
@@ -288,6 +420,8 @@ def sanity_pass(spec: QuerySpec, question: str) -> QuerySpec:
     spec = _strip_invented_period(spec, question)
     spec = _strip_unasked_status_filters(spec, question)
     spec = _set_bound_strictness(spec, question)
+    spec = _normalise_account_numbers(spec, question)
+    spec = _refuse_account_number_disclosure(spec, question)
     return _force_unsupported_for_absent_concepts(spec, question)
 
 

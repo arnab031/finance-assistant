@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from api.compile import CompileError, compile_query
 from api.config import settings
 from api.crypto import assert_no_plaintext, placeholderise, resolve_rows
-from api.db import db
+from api.db import db, json_column
 from api.extract import ExtractionFailed, extract
 from api.llm.ollama import ModelUnavailable
 from api.narrate import narrate, template_answer
@@ -49,6 +49,19 @@ log = logging.getLogger("tbx.ask")
 router = APIRouter()
 
 
+def _done(trace: RequestTrace, confidence: str) -> DoneEvent:
+    """Every exit reports its timings, not just the happy path: a decline that
+    took four seconds of model time should say so as plainly as an answer."""
+    return DoneEvent(
+        message_id=trace.message_id,
+        confidence=confidence,
+        total_ms=trace.total_ms,
+        extract_ms=trace.extract_ms,
+        sql_ms=trace.sql_ms,
+        narrate_ms=trace.narrate_ms,
+    )
+
+
 def frame(event: BaseModel) -> str:
     return f"data: {json.dumps(jsonable(event.model_dump()))}\n\n"
 
@@ -65,6 +78,27 @@ SSE_HEADERS = {
 # --------------------------------------------------------------------------
 
 
+def _llm_for(request: Request, model: str | None):
+    """The app's own client unless the caller named a different model.
+
+    The name is CHECKED against EVAL_MODELS rather than passed through. An
+    unchecked string would let a request name any model, and Ollama answers an
+    unpulled name with a 404 that fails every stage - so this is the same closed
+    set the compiler gives dimensions, applied to model choice.
+    """
+    default = request.app.state.llm
+    if not model or model == settings.ollama_model:
+        return default
+    # Per-model clients are an Ollama concept; other providers keep the default.
+    if settings.llm_provider != "ollama" or model not in settings.eval_model_names:
+        log.info("ignoring unknown model %r, using the default", model)
+        return default
+
+    from api.llm.base import get_llm_for
+
+    return get_llm_for(model)
+
+
 @router.post("/api/ask")
 async def ask(body: AskRequest, request: Request) -> StreamingResponse:
     return StreamingResponse(_pipeline(body, request),
@@ -73,7 +107,7 @@ async def ask(body: AskRequest, request: Request) -> StreamingResponse:
 
 async def _pipeline(body: AskRequest, request: Request) -> AsyncIterator[str]:
     reg = request.app.state.registry
-    llm = request.app.state.llm
+    llm = _llm_for(request, body.model)
 
     # A thread is always created. Without one the ambiguity resolver cannot load
     # settled choices, so a client that omits it silently loses stickiness -
@@ -115,7 +149,7 @@ async def _pipeline(body: AskRequest, request: Request) -> AsyncIterator[str]:
                     else prof.unsupported_note)
             trace.note(text)
             yield frame(NoteEvent(kind="coverage", text=text))
-            yield frame(DoneEvent(message_id=trace.message_id, confidence="high"))
+            yield frame(_done(trace, "high"))
             return
 
         if spec.period is not None and not reg.covers(spec.period.start, spec.period.end):
@@ -123,7 +157,7 @@ async def _pipeline(body: AskRequest, request: Request) -> AsyncIterator[str]:
                     f"Coverage runs {reg.earliest} to {reg.latest}.")
             trace.note(text)
             yield frame(NoteEvent(kind="coverage", text=text))
-            yield frame(DoneEvent(message_id=trace.message_id, confidence="high"))
+            yield frame(_done(trace, "high"))
             return
 
         if spec.period is not None:
@@ -138,7 +172,18 @@ async def _pipeline(body: AskRequest, request: Request) -> AsyncIterator[str]:
         resolver = AmbiguityResolver(db, reg)
         decision = await resolver.resolve(
             spec, body.question, settled=await _load_settled(trace.thread_id))
+        before = spec
         spec = trace.spec = decision.spec
+
+        # Re-emit when resolution rewrote the spec. The first SpecEvent is sent
+        # before the resolver runs, so the provenance panel was showing the
+        # PRE-resolution spec while the SQL below ran the resolved one - it read
+        # "gross_amount" next to a query summing signed_amount. The panel is the
+        # trust surface; a metric there that was not the one executed is worse
+        # than no panel. Persistence was always correct (trace.spec), only the
+        # stream was stale.
+        if spec != before:
+            yield frame(SpecEvent(spec=spec))
 
         if decision.needs_user:
             trace.clarified = True
@@ -146,7 +191,7 @@ async def _pipeline(body: AskRequest, request: Request) -> AsyncIterator[str]:
             trace.confidence = "medium"
             request.app.state.pending[decision.clarify.ambiguity_id] = decision.clarify
             yield frame(decision.clarify.to_event())
-            yield frame(DoneEvent(message_id=trace.message_id, confidence="medium"))
+            yield frame(_done(trace, "medium"))
             return
 
         for note in decision.notes:
@@ -200,7 +245,7 @@ async def clarify(body: ClarifyRequest, request: Request) -> StreamingResponse:
 
 async def _clarify_pipeline(body: ClarifyRequest, request: Request) -> AsyncIterator[str]:
     reg = request.app.state.registry
-    llm = request.app.state.llm
+    llm = _llm_for(request, body.model)
     amb = request.app.state.pending.get(body.ambiguity_id)
 
     if amb is None:
@@ -249,6 +294,21 @@ async def _clarify_pipeline(body: ClarifyRequest, request: Request) -> AsyncIter
 # --------------------------------------------------------------------------
 
 
+def _is_empty_aggregate(columns, rows) -> bool:
+    """One row whose every measure is NULL or a zero count = nothing matched.
+
+    Not `len(rows) == 0`: SUM() over an empty set yields a row, not no rows.
+    A genuine zero-valued result keeps a non-zero count, so it is not caught.
+    """
+    if len(rows) != 1:
+        return False
+    row = dict(zip(columns, rows[0]))
+    if "value" not in row:
+        return False
+    count = row.get("txn_count")
+    return row["value"] is None and (count is None or count == 0)
+
+
 async def _execute(spec, reg, trace: RequestTrace, llm, question: str) -> AsyncIterator[str]:
     """Compile, run, narrate, verify, emit. Shared so a clarified answer takes
     exactly the same path - and is traced identically - to an unambiguous one."""
@@ -259,6 +319,32 @@ async def _execute(spec, reg, trace: RequestTrace, llm, question: str) -> AsyncI
     yield frame(SqlEvent(sql=cq.sql, params=jsonable(cq.params)))
 
     columns, raw_rows, sql_ms = await db.fetch_timed(cq.sql, cq.params)
+
+    # An ungrouped aggregate over NOTHING still returns one row - (NULL, 0) -
+    # so every `if not rows` check in this codebase is blind to it, and the
+    # model reads that row as the number zero. Measured, before this note
+    # existed: "The sum of all transactions regarding the account number
+    # 30123456789012 is Rs 0." Verified, high confidence, green badge - and
+    # false. Zero means "these netted to nothing"; the truth was "no such
+    # transactions". Said plainly here rather than left to the narrator.
+    #
+    # The wording is deliberately the SAME whether the account exists with no
+    # activity or does not exist at all. Distinguishing them would be a kinder
+    # message and an account-number oracle: this endpoint is unauthenticated,
+    # so a nicer error would let anyone walk the number space and learn which
+    # accounts are real.
+    if _is_empty_aggregate(columns, raw_rows):
+        # Collapsed to no rows, not merely annotated. Left in place the row
+        # reaches the breakdown table as "— | 0" under a "1 row" caption, the
+        # narrator reads a 0 it can legitimately quote, and trace.row_count = 1
+        # so v_health never classes it as an empty result. Dropping it makes
+        # every one of those agree with the note.
+        raw_rows = []
+        text = ("No transactions match that. The filters are valid - the data "
+                "simply holds nothing for them, which is not the same as a "
+                "total of zero.")
+        trace.note(text)
+        yield frame(NoteEvent(kind="coverage", text=text))
 
     # Decrypt, then immediately swap the plaintext for a placeholder. Everything
     # downstream - the model, the trace, the stored message - works in
@@ -311,7 +397,7 @@ async def _execute(spec, reg, trace: RequestTrace, llm, question: str) -> AsyncI
     elif trace.template_used:
         trace.confidence = "medium"
 
-    yield frame(DoneEvent(message_id=trace.message_id, confidence=trace.confidence))
+    yield frame(_done(trace, trace.confidence))
 
 
 async def _settle(thread_id: str, kind: str, trigger: str, key: str) -> None:
@@ -334,4 +420,5 @@ async def _load_settled(thread_id: str | None) -> dict:
         return {}
     row = await db.fetchone(
         "SELECT settled FROM chat_threads WHERE thread_id = %(t)s", {"t": thread_id})
-    return (row or {}).get("settled") or {}
+    settled = json_column((row or {}).get("settled"), default={})
+    return settled if isinstance(settled, dict) else {}

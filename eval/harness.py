@@ -218,6 +218,27 @@ def grade_behaviour(q: dict, a: Answer) -> Result:
         if a.rows:
             base.detail = "returned rows for a period outside coverage"
 
+    elif want == "must_report_no_transactions":
+        # Neither existing kind fits. must_refuse_no_data needs "no data" in the
+        # notes AND zero rows; an ungrouped aggregate over nothing returns ONE
+        # row of (NULL, 0), so both halves are false. Numeric grading is worse:
+        # the honest result is NULL, and COALESCE-ing it to 0 would make the
+        # canary go green on "you spent Rs 0" - the dishonest answer this
+        # question exists to catch.
+        #
+        # Both halves are required. The note alone would pass even if the filter
+        # never applied (an empty database says the same thing), so the spec is
+        # checked too.
+        told = "no transactions match" in notes
+        filtered = bool(((a.spec or {}).get("filters") or {}).get("account_numbers"))
+        base.actual = ("reported-none" if told else "silent") + (
+            "/filtered" if filtered else "/UNFILTERED")
+        base.passed = told and filtered
+        if not told:
+            base.detail = "did not say the result was empty - a bare 0 reads as real"
+        elif not filtered:
+            base.detail = "no account filter in the spec; the answer was not scoped"
+
     elif want == "must_be_unsupported":
         base.actual = f"intent:{intent}" if intent else "no spec"
         base.passed = intent == "unsupported" and not a.rows

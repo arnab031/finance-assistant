@@ -37,6 +37,29 @@ class ModelUnavailable(RuntimeError):
     """
 
 
+async def list_models() -> list[str]:
+    """Chat models the daemon has actually pulled.
+
+    Read from Ollama rather than hardcoded so the picker can only offer a model
+    that will run. A name that was never pulled is the failure ModelUnavailable
+    below describes: every question fails in milliseconds and the run records a
+    0% row, which reads as a model that performs terribly rather than one that
+    is absent. Filtering the list at the source is cheaper than explaining that
+    row afterwards.
+    """
+    async with httpx.AsyncClient(base_url=settings.ollama_url, timeout=10) as c:
+        resp = await c.get("/api/tags")
+        resp.raise_for_status()
+        names = [m["name"] for m in resp.json().get("models", []) if m.get("name")]
+
+    # The embedding model shares the daemon but cannot answer a chat prompt, so
+    # offering it would guarantee a 0% run. Compared on the base name because
+    # /api/tags reports "nomic-embed-text:latest" where the setting says
+    # "nomic-embed-text".
+    embed = settings.embed_model.split(":")[0]
+    return sorted(n for n in names if n.split(":")[0] != embed)
+
+
 class OllamaLLM:
     def __init__(self, model: str | None = None) -> None:
         self.model = model or settings.ollama_model

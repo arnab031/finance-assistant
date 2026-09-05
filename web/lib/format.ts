@@ -24,6 +24,15 @@ export function formatMoney(v: unknown): string {
   });
 }
 
+/**
+ * "1 row", "12 rows". Shared because it was written twice and only one copy
+ * pluralised: the same result read "1 row" above the table and "1 rows" on the
+ * provenance line right below it.
+ */
+export function countLabel(n: number, singular: string, plural = `${singular}s`) {
+  return `${formatCount(n)} ${n === 1 ? singular : plural}`;
+}
+
 export function formatCount(v: unknown): string {
   const n = typeof v === "number" ? v : isNumericString(v) ? Number(v) : NaN;
   return Number.isNaN(n) ? String(v ?? "") : n.toLocaleString("en-IN");

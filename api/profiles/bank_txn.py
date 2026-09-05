@@ -21,7 +21,7 @@ Three structural facts drive almost every choice in this file.
 
 from __future__ import annotations
 
-from api.profiles.base import Dim, Filt, Profile, SemanticSource
+from api.profiles.base import Dim, Filt, MetricFork, Profile, SemanticSource
 
 DIMENSIONS = {
     "bank":             Dim("t.bank_name", "bank"),
@@ -85,6 +85,17 @@ FILTERS = {
     "reference_id": Filt(
         "t.transaction_reference_id",
         hint="A bare reference or receipt number. Not the UTR."),
+    # PLURAL AND kind="list" ON PURPOSE. _where picks its LIKE branch by the
+    # NAME suffix "_like", not by kind, so a singular "account_number" with
+    # kind="text" would be declared to the model as a string and then handed to
+    # _in_list, which would spread that string into one placeholder per
+    # CHARACTER. The name and the kind have to agree; this pair compiles to an
+    # exact `t.account_number IN (%(f_account_numbers_0)s)`.
+    "account_numbers": Filt(
+        "t.account_number",
+        hint="A full account number the user typed, digits only. Use this "
+             "whenever the question names a specific account. This FILTERS by "
+             "the number - it never displays one."),
     # Compiled against the metric's own amount column, not this sql string -
     # see _where. Declared here so the extraction schema offers them at all.
     "min_amount": Filt("t.transaction_amount", kind="number",
@@ -125,7 +136,14 @@ metric
   the metric. They never turn a spend question into gross_amount.
   "received", "incoming", "credits", "deposits"       -> credit_amount
   "net", "net flow", "net movement"                   -> net_amount
-  "total transacted", "throughput"                    -> gross_amount
+  "total transacted", "throughput", "in and out"      -> gross_amount
+
+  "the total for this account", "sum of all transactions", with NO direction
+  word                                              -> net_amount
+  gross_amount ADDS credits to debits. For a question about an account it
+  reports throughput and calls it a total, so an account with equal flows both
+  ways looks twice as busy as its balance moved. Use it only when the user
+  actually asks about throughput.
   "how many transactions"                             -> txn_count
   "how many accounts"                                 -> account_count
   "who did we pay the most"                           -> group_by ["counterparty"]
@@ -167,9 +185,29 @@ reference numbers
   A bare "reference number" or "ref no" means transaction_reference_id.
   Only use utr_number when the user says "UTR" explicitly.
 
+account numbers
+  (Every number below is 12345678901234, which is in no account. registry
+  prompt_context ships these rules to the model on EVERY request, so a real
+  account number written here would be disclosed to the model forever - the
+  one thing api/crypto.py exists to prevent - and the model would have a live
+  account to reach for whenever a question was vague about which one.)
+
+  A question naming an account number IS answerable. Put the digits in
+  filters.account_numbers and answer it like any other question - the number
+  came from the user, so filtering by it reveals nothing they did not already
+  have. All of these are ordinary aggregate questions:
+    "sum of all transactions for account number 12345678901234"
+    "how much went through A/C 12345678901234"
+    "what did account 12345678901234 spend in June 2026"
+  Digits only: drop spaces, hyphens and any "A/C" or "account" prefix.
+  account_numbers is NOT account_ids - the latter holds internal ids nobody
+  types. If the user gives digits, they mean account_numbers.
+
 sensitive data
-  Account numbers and UTR numbers are masked and cannot be shown in full.
-  Never claim to display one.
+  You may FILTER by an account number or a UTR. You may not DISPLAY either in
+  full; both are masked wherever they are shown. So "show me the full account
+  number for the HDFC account" is still unsupported, while "how much did we
+  spend on account 12345678901234" is not. Filtering is not displaying.
 
 intent
   aggregate  - one number, optionally grouped
@@ -203,6 +241,19 @@ FEWSHOT: list[tuple[str, dict]] = [
      {"intent": "aggregate", "metric": "credit_amount", "group_by": [],
       "date_basis": "payment_date",
       "period": {"start": "2026-08-01", "end": "2026-09-01", "label": "August 2026"}}),
+
+    # 12345678901234 is in no account, deliberately: FEWSHOT is json.dumps'd
+    # into every extraction prompt, so a live account number here would be
+    # disclosed to the model on every request forever.
+    #
+    # net_amount, not gross, because that is what metric_forks below defaults to
+    # for this exact phrasing - a few-shot teaching the other reading would fight
+    # the fork and then be silently overridden by it.
+    ("What is the sum of all transactions for account 12345678901234?",
+     {"intent": "aggregate", "metric": "net_amount", "group_by": [],
+      "date_basis": "payment_date",
+      "filters": {"account_numbers": ["12345678901234"]},
+      "reasoning": "a total for an account nets credits against debits"}),
 
     ("What was the net movement across all accounts?",
      {"intent": "aggregate", "metric": "net_amount", "group_by": [],
@@ -274,6 +325,7 @@ FEWSHOT: list[tuple[str, dict]] = [
      {"intent": "unsupported", "metric": "debit_amount", "group_by": [],
       "date_basis": "payment_date",
       "reasoning": "no employee data in this database"}),
+
 ]
 
 PROFILE = Profile(
@@ -386,8 +438,9 @@ PROFILE = Profile(
         "That isn't answerable from this data. It holds bank statement lines — "
         "date, amount, credit or debit, bank, account, entity, program, and the "
         "counterparty name read out of the narration text — so spending, income, "
-        "net movement and who was paid are all fair questions. Account and UTR "
-        "numbers do exist, but only in masked form."
+        "net movement and who was paid are all fair questions. If you have an "
+        "account number, ask about it directly and that is answerable too; what "
+        "cannot be done is listing or displaying account and UTR numbers."
     ),
     # No reconciliation table exists, so the intent cannot be compiled.
     disabled_intents=frozenset({"reconcile"}),
@@ -405,6 +458,34 @@ PROFILE = Profile(
     # per distinct payee. Everything else in this schema is an enum (two
     # values), an id, or a bank name already matched exactly - none of which
     # gain anything from an embedding.
+    # "The sum of all transactions on this account" has two honest answers, and
+    # the wrong one is the tempting one: gross_amount ADDS credits to debits, so
+    # an account with a lakh in and a lakh out reports two lakh of "total". Net
+    # is what the account actually did, so it is the default; the disclosure
+    # names the other reading and its value, and the spread decides whether the
+    # user hears about it at all.
+    metric_forks=(
+        MetricFork(
+            trigger=r"\b(sum|total|overall|altogether|all (the )?transactions?)\b",
+            # Any word that already picks a direction disarms the fork.
+            resolved_by=(r"\b(net|gross|throughput|spend|spent|spending|paid|"
+                         r"pay|payments?|received|receipts?|incoming|outgoing|"
+                         r"credits?|debits?|in and out|inflow|outflow)\b"),
+            a_key="net_amount",
+            a_label="Net movement",
+            a_detail="Credits minus debits — what the balance actually changed by",
+            b_key="gross_amount",
+            b_label="Total transacted",
+            b_detail="Credits and debits added together — throughput, not a balance",
+            default_key="net_amount",
+            message=('"Total" could mean net movement or everything transacted '
+                     "— a {gap} difference here."),
+            # Disclose rather than interrupt: net is the defensible reading of a
+            # bank total, and the two coincide whenever a set is one-directional.
+            can_ask=False,
+        ),
+    ),
+
     semantic_sources=(
         SemanticSource(
             entity_type="counterparty",

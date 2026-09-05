@@ -18,7 +18,7 @@ from fastapi.responses import StreamingResponse
 
 from api.config import settings
 from api.clock import rows_with_instants, with_instants
-from api.db import db
+from api.db import db, json_column
 from api.observability import jsonable
 from eval.harness import load_questions, run_eval
 
@@ -45,6 +45,39 @@ async def questions():
     }
 
 
+@router.get("/api/models")
+async def models():
+    """What the canary can be run against.
+
+    The scorecard only means something if a second row can be produced, and the
+    row is per MODEL, not per provider - two Ollama models are a real comparison
+    without an API key. Served rather than hardcoded in the UI so the picker
+    cannot offer something the daemon does not have pulled.
+    """
+    from api.llm.ollama import list_models
+
+    try:
+        available = await list_models()
+    except Exception as exc:  # noqa: BLE001 - the picker must still render
+        log.warning("could not list ollama models: %s", exc)
+        # The configured model is the one thing we know is intended, so the
+        # dropdown degrades to it rather than to empty.
+        return {"models": [settings.ollama_model],
+                "default": settings.ollama_model, "error": str(exc)}
+
+    declared = settings.eval_model_names
+    # Declared order wins, but only for models the daemon can actually load.
+    # A name in EVAL_MODELS that was never pulled is reported separately rather
+    # than dropped: silently shrinking the picker is how a typo in .env becomes
+    # ten minutes of wondering where the model went.
+    offered = [m for m in declared if m in available]
+    missing = [m for m in declared if m not in available]
+    if not offered:
+        offered = available or [settings.ollama_model]
+    return {"models": offered, "default": settings.ollama_model,
+            "missing": missing}
+
+
 @router.post("/api/eval/run")
 async def eval_run(request: Request) -> StreamingResponse:
     """Streams each question's verdict. 50 questions is several minutes, so a
@@ -56,25 +89,58 @@ async def eval_run(request: Request) -> StreamingResponse:
         pass
 
     provider = body.get("provider") or settings.llm_provider
+    model_name = body.get("model") or None
     only = body.get("only")
     notes = body.get("notes", "")
 
     async def stream() -> AsyncIterator[str]:
+        # The harness drives this API over HTTP, so the model it measures is
+        # whichever one app.state.llm holds - swapping that reference IS how a
+        # run targets something other than the default. It is process-wide for
+        # the duration, so a chat request arriving mid-run is answered by the
+        # model under test. Acceptable on a single-operator ops page, and the
+        # reason the swap is put back in `finally` rather than at the end.
         llm = request.app.state.llm
         original_provider = settings.llm_provider
-        swapped = False
+        original_model = settings.ollama_model
+        swapped_llm = None
 
         try:
-            # Targeting a different provider is how the bake-off row gets filled.
-            if provider != original_provider:
+            # Reject an unpulled name BEFORE running. Without this the request
+            # is accepted, all 40 questions fail in milliseconds, and the
+            # scorecard gains a 0% row for a model that was never there.
+            if model_name and provider == "ollama":
+                from api.llm.ollama import list_models
+
+                try:
+                    available = await list_models()
+                except Exception as exc:  # noqa: BLE001 - daemon down
+                    yield _frame("error", {"message": f"Ollama unreachable: {exc}"})
+                    return
+                if model_name not in available:
+                    yield _frame("error", {
+                        "message": f"Model {model_name!r} is not pulled. "
+                                   f"Available: {', '.join(available) or 'none'}",
+                    })
+                    return
+
+            # Targeting a different provider OR model is how a second scorecard
+            # row gets filled.
+            if provider != original_provider or (
+                model_name and model_name != original_model
+            ):
                 from api.llm.base import get_llm
 
                 settings.llm_provider = provider
+                if model_name:
+                    settings.ollama_model = model_name
                 try:
-                    request.app.state.llm = get_llm()
-                    swapped = True
+                    swapped_llm = get_llm()
+                    request.app.state.llm = swapped_llm
                 except Exception as exc:  # noqa: BLE001
                     settings.llm_provider = original_provider
+                    settings.ollama_model = original_model
+                    swapped_llm = None
                     yield _frame("error", {
                         "message": f"Cannot use provider {provider!r}: {exc}",
                     })
@@ -103,9 +169,12 @@ async def eval_run(request: Request) -> StreamingResponse:
             log.exception("eval run failed")
             yield _frame("error", {"message": str(exc)})
         finally:
-            if swapped:
+            if swapped_llm is not None:
                 settings.llm_provider = original_provider
+                settings.ollama_model = original_model
                 request.app.state.llm = llm
+                # One httpx client per run would otherwise be left open.
+                await swapped_llm.close()
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
@@ -176,7 +245,7 @@ async def replay(query_log_id: int, request: Request):
     except Exception as exc:  # noqa: BLE001
         return {"question": row["question"], "error": f"re-extraction failed: {exc}"}
 
-    old = row["spec"] or {}
+    old = json_column(row["spec"], default={})
     new = json.loads(fresh_spec.model_dump_json())
 
     ignore = {"reasoning", "ambiguities"}

@@ -11,8 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from api.config import settings
-from api.db import db
-from api.llm.base import get_llm
+from api.db import db, json_column
+from api.llm.base import close_model_clients, get_llm
 from api.narration import ensure_counterparty
 from api.registry import SemanticRegistry
 from api.semantic import ensure_semantic_index
@@ -49,6 +49,7 @@ async def lifespan(app: FastAPI):
     log.info("ready on %s", settings.database_url.rsplit("/", 1)[-1])
     yield
     await app.state.llm.close()
+    await close_model_clients()
     await db.close()
 
 
@@ -142,6 +143,11 @@ async def metrics(hours: int = 24):
     incidents = await db.fetch(
         "SELECT id, issue, LEFT(question,70) AS question, unverified, "
         "sanity_corrected, total_ms FROM v_incidents LIMIT 10")
+    # The client's Incident type declares these as string[]; undecoded they
+    # arrive as one long string and render as a run of characters.
+    for inc in incidents:
+        for key in ("unverified", "sanity_corrected"):
+            inc[key] = json_column(inc.get(key), default=[])
 
     return {
         "ok": not breaches,

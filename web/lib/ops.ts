@@ -43,9 +43,15 @@ export const getRun = (id: string) =>
   get<{ run: RunSummary; results: EvalResult[] }>(`/api/eval/runs/${id}`);
 export const getReplay = (id: number) => get<any>(`/api/replay/${id}`);
 
+/** Models the daemon has pulled, plus which one is configured as default. */
+export const getModels = () =>
+  get<{ models: string[]; default: string; missing?: string[]; error?: string }>(
+    "/api/models",
+  );
+
 /** Streams one verdict per question; 50 questions runs for minutes. */
 export async function* runEval(
-  body: { provider?: string; only?: string[]; notes?: string },
+  body: { provider?: string; model?: string; only?: string[]; notes?: string },
   signal?: AbortSignal,
 ) {
   const res = await fetch(`${API}/api/eval/run`, {

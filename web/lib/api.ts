@@ -77,6 +77,18 @@ export type Suggestions = {
   dataset: string; label: string; placeholder: string; suggestions: string[];
 };
 
+/** Models the chat may be answered by. Same endpoint /ops uses to pick a
+ *  canary target - one declared list (EVAL_MODELS), so the two screens can
+ *  never offer different models. */
+export async function getModels(): Promise<
+  { models: string[]; default: string } | null
+> {
+  try {
+    const r = await fetch(`${API}/api/models`, { cache: "no-store" });
+    return r.ok ? await r.json() : null;
+  } catch { return null; }
+}
+
 /** Starter chips come from the backend so they always match the loaded schema. */
 export async function getSuggestions(): Promise<Suggestions | null> {
   try {
