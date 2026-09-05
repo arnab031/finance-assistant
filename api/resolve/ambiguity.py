@@ -32,8 +32,10 @@ from typing import Literal
 from api.compile import CompileError, compile_scalar
 from api.config import settings
 from api.db import Database
+from api.money import fmt_count, fmt_inr
+from api.profiles.base import get_profile
 from api.registry import SemanticRegistry
-from api.resolve.entities import VendorMatch, is_meaningful, resolve_vendor
+from api.semantic import search as semantic_search
 from api.schema import ClarifyEvent, ClarifyOption, NoteEvent, QuerySpec
 
 log = logging.getLogger("tbx.ambiguity")
@@ -58,8 +60,8 @@ class Interpretation:
     def preview(self) -> str:
         if self.value is None:
             return "no result"
-        n = f" · {self.rows:,} transactions" if self.rows is not None else ""
-        return f"${self.value:,.2f}{n}"
+        n = f" · {fmt_count(self.rows)} transactions" if self.rows is not None else ""
+        return f"{fmt_inr(self.value)}{n}"
 
 
 @dataclass
@@ -85,16 +87,37 @@ class Ambiguity:
     ambiguity_id: str = field(default_factory=lambda: f"amb_{uuid.uuid4().hex[:8]}")
 
     def _values(self) -> list[Decimal]:
-        return [abs(i.value) for i in self.interpretations if i.value is not None]
+        """Signed, deliberately.
+
+        These were abs()'d, which made two readings that differ ONLY IN SIGN
+        look identical. Measured on a real question: "sum of all transactions
+        for account 50200099284137" prices net at -71,156.00 and gross at
+        +71,156.00 - opposite answers, 1,42,312.00 apart - and abs() collapsed
+        both to 71,156.00, so spread came out 0.0%, below even the silent
+        threshold. The fork then applied its net default with NO disclosure, and
+        the user was shown a negative total for a question whose other reading
+        was positive, with nothing on screen saying a choice had been made.
+
+        Sign is not a detail in a ledger: it is the difference between money
+        arriving and money leaving. It cannot be normalised away before deciding
+        whether a difference is worth mentioning.
+        """
+        return [i.value for i in self.interpretations if i.value is not None]
 
     @property
     def spread(self) -> float:
-        """Relative gap between the widest interpretations. 0.0 = identical."""
+        """Relative gap between the widest interpretations. 0.0 = identical.
+
+        Scaled by the largest MAGNITUDE rather than by the maximum, so a range
+        straddling zero cannot divide by a small positive number and report a
+        spread larger than the difference warrants.
+        """
         vals = self._values()
         if len(vals) < 2:
             return 0.0
-        hi = max(vals)
-        return 0.0 if hi == 0 else float((hi - min(vals)) / hi)
+        hi, lo = max(vals), min(vals)
+        scale = max(abs(hi), abs(lo))
+        return 0.0 if scale == 0 else float((hi - lo) / scale)
 
     @property
     def absolute_gap(self) -> Decimal | None:
@@ -130,10 +153,12 @@ class Ambiguity:
 
 
 def _money_gap(a: Ambiguity) -> str:
-    vals = [abs(i.value) for i in a.interpretations if i.value is not None]
+    # Signed, like _values(): abs() here reported "a ₹0 difference" in the very
+    # disclosure that exists because net -71,156 and gross +71,156 differ.
+    vals = [i.value for i in a.interpretations if i.value is not None]
     if len(vals) < 2:
         return "different amounts"
-    return f"${max(vals) - min(vals):,.0f}"
+    return fmt_inr(max(vals) - min(vals), places=0)
 
 
 @dataclass
@@ -153,9 +178,6 @@ class Decision:
 # --------------------------------------------------------------------------
 
 _FISCAL_RE = re.compile(r"\b(fy\s*\d{2,4}|fiscal(?:\s+year)?|financial\s+year)\b", re.I)
-_SPEND_RE = re.compile(r"\b(spend|spent|spending|cost|costs|how much|paid out)\b", re.I)
-_COMMITTED_RE = re.compile(r"\b(committed|commitment|owe[ds]?|outstanding|pending|"
-                           r"retainage|accrued|liabilit)\w*\b", re.I)
 _OPEN_RE = re.compile(r"\b(unreconciled|un-?matched|not reconciled|open items?|"
                       r"outstanding items?|still open)\b", re.I)
 
@@ -212,34 +234,47 @@ def detect_temporal(spec: QuerySpec, q: str, reg: SemanticRegistry) -> Ambiguity
 
 
 def detect_metric(spec: QuerySpec, q: str, reg: SemanticRegistry) -> Ambiguity | None:
-    """"Spend" = money that left, or money committed?"""
-    if not reg.money_metric_split():
-        return None
-    if spec.metric not in ("amount_paid", "amount_total"):
-        return None
-    if not _SPEND_RE.search(q) or _COMMITTED_RE.search(q):
-        return None  # explicit wording resolves it
+    """A money question with two defensible answers.
 
-    return Ambiguity(
-        kind="metric",
-        trigger="spend",
-        message='"Spend" could mean money paid or money committed - a {gap} difference here.',
-        interpretations=[
-            Interpretation(
-                key="amount_paid", label="Money paid out",
-                detail="Cash that actually left, excluding pending and retainage",
-                spec=spec.patched(metric="amount_paid"),
-            ),
-            Interpretation(
-                key="amount_total", label="Total committed",
-                detail="Paid plus pending plus retainage held",
-                spec=spec.patched(metric="amount_total"),
-            ),
-        ],
-        default_key="amount_paid",
-        is_money=True,
-        can_ask=False,   # strong default: "spend" means cash out
-    )
+    Was hardcoded to the vendor_payments metric names (amount_paid vs
+    amount_total), so on the bank schema it returned None for every question and
+    the equivalent fork went undetected: asked for "the sum of all transactions
+    on account X" the extractor chose gross_amount, which ADDS credits to
+    debits. That is not a total anyone means - on an account with equal flows in
+    and out it reports double the throughput and calls it a sum.
+
+    The fork now comes from the profile, so each dataset names its own.
+    """
+    from api.profiles.base import get_profile
+
+    prof = get_profile()
+    for fork in prof.metric_forks:
+        if fork.a_key not in prof.metrics or fork.b_key not in prof.metrics:
+            continue
+        if spec.metric not in (fork.a_key, fork.b_key):
+            continue
+        if not re.search(fork.trigger, q, re.I):
+            continue
+        if re.search(fork.resolved_by, q, re.I):
+            continue      # the question already said which one it wants
+
+        return Ambiguity(
+            kind="metric",
+            trigger=fork.trigger,
+            message=fork.message,
+            interpretations=[
+                Interpretation(key=fork.a_key, label=fork.a_label,
+                               detail=fork.a_detail,
+                               spec=spec.patched(metric=fork.a_key)),
+                Interpretation(key=fork.b_key, label=fork.b_label,
+                               detail=fork.b_detail,
+                               spec=spec.patched(metric=fork.b_key)),
+            ],
+            default_key=fork.default_key,
+            is_money=True,
+            can_ask=fork.can_ask,
+        )
+    return None
 
 
 def detect_scope(spec: QuerySpec, q: str, reg: SemanticRegistry) -> Ambiguity | None:
@@ -275,42 +310,14 @@ def detect_scope(spec: QuerySpec, q: str, reg: SemanticRegistry) -> Ambiguity | 
     )
 
 
-def detect_entity(spec: QuerySpec, match: VendorMatch | None) -> Ambiguity | None:
-    """Which vendor did they mean? Fires when no single entity dominates."""
-    if match is None or len(match.candidates) < 2:
-        return None
-    if match.dominance() >= 0.85:
-        return None  # one vendor holds nearly all the spend; picking it is safe
-
-    top = match.candidates[0]
-    everyone = match.candidates
-    return Ambiguity(
-        kind="entity",
-        trigger=match.query,
-        message=f'"{match.query}" matches {len(everyone)} vendors, '
-                f"differing by {{gap}}.",
-        interpretations=[
-            Interpretation(
-                key="top", label=top.vendor_name,
-                detail=f"{top.txn_count:,} transactions on record",
-                spec=spec.patched(filters=spec.filters.model_copy(
-                    update={"vendor_ids": [top.vendor_id], "vendor_query": None}).model_dump()),
-            ),
-            Interpretation(
-                key="all", label=f"All {len(everyone)} matching vendors",
-                detail=", ".join(c.vendor_name for c in everyone[:4]),
-                spec=spec.patched(filters=spec.filters.model_copy(
-                    update={"vendor_ids": [c.vendor_id for c in everyone],
-                            "vendor_query": None}).model_dump()),
-            ),
-        ],
-        default_key="top",
-        is_money=spec.metric in _MONEY,
-    )
-
-
-_ONE_DAY = __import__("datetime").timedelta(days=1)
-_MONEY = {"amount_paid", "amount_total", "amount_pending", "amount_retainage", "avg_amount"}
+# detect_entity lived here: "which vendor did they mean?", fired when no single
+# vendor dominated the candidate list. It went with the vendor_payments profile.
+#
+# Its bank_txn counterpart is NOT another detector. A counterparty name is
+# matched with LIKE, which either finds rows or does not - there is no candidate
+# list to be ambiguous about. When LIKE finds nothing, the semantic index
+# proposes the closest name and DISCLOSES the substitution rather than asking:
+# see AmbiguityResolver._rescue_lexical_miss.
 
 
 # --------------------------------------------------------------------------
@@ -344,9 +351,10 @@ class AmbiguityResolver:
     ) -> Decision:
         settled = settled or {}
 
-        # Entity resolution happens first: it rewrites the spec (vendor_query ->
-        # vendor_ids) and its candidate list feeds the entity detector.
-        spec, match = await self._resolve_entities(spec)
+        # A lexical miss gets one semantic retry before anything else runs, so
+        # the detectors below reason about the filter that will actually execute.
+        spec, rescue = await self._rescue_lexical_miss(spec)
+        extra = [rescue] if rescue else []
 
         # Apply previously-settled choices BEFORE detecting the rest. Detectors
         # build their interpretations from the spec they are given, so running
@@ -354,13 +362,13 @@ class AmbiguityResolver:
         # computed on a basis they already rejected - e.g. after choosing the
         # payment-date reading of FY2026, the paid-vs-committed options would
         # still have been priced on the fiscal-year column.
-        spec = self._apply_settled(spec, question, match, settled)
+        spec = self._apply_settled(spec, question, settled)
 
-        found = [a for a in self._detect_all(spec, question, match)
+        found = [a for a in self._detect_all(spec, question)
                  if not self._settled_choice(a, settled)]
 
         if not found:
-            return Decision(spec=spec)
+            return Decision(spec=spec, notes=extra)
 
         await self._probe_all(found)
 
@@ -369,9 +377,10 @@ class AmbiguityResolver:
             worst = max(material, key=lambda a: (a.spread, a.absolute_gap or 0))
             log.info("clarify %s (%s) spread=%.1f%% gap=%s", worst.kind, worst.trigger,
                      worst.spread * 100, worst.absolute_gap)
-            return Decision(spec=spec, clarify=worst, detected=found)
+            return Decision(spec=spec, clarify=worst, notes=extra, detected=found)
 
-        notes = [a.disclosure() for a in found if a.spread >= settings.ambiguity_silent]
+        notes = extra + [a.disclosure() for a in found
+                         if a.spread >= settings.ambiguity_silent]
         for a in found:
             chosen = a.by_key(a.default_key)
             if chosen is not None:
@@ -382,13 +391,12 @@ class AmbiguityResolver:
     # ---- internals ----
 
     def _detect_all(
-        self, spec: QuerySpec, question: str, match: VendorMatch | None
+        self, spec: QuerySpec, question: str
     ) -> list[Ambiguity]:
         return [a for a in (
             detect_temporal(spec, question, self.reg),
             detect_metric(spec, question, self.reg),
             detect_scope(spec, question, self.reg),
-            detect_entity(spec, match),
         ) if a is not None]
 
     @staticmethod
@@ -399,7 +407,7 @@ class AmbiguityResolver:
         return settled.get(f"{a.kind}:{a.trigger}") or settled.get(a.kind)
 
     def _apply_settled(
-        self, spec: QuerySpec, question: str, match: VendorMatch | None,
+        self, spec: QuerySpec, question: str,
         settled: dict[str, str],
     ) -> QuerySpec:
         """Fold every remembered choice into the spec.
@@ -412,7 +420,7 @@ class AmbiguityResolver:
         """
         for _ in range(len(settled) + 2):
             applied = False
-            for a in self._detect_all(spec, question, match):
+            for a in self._detect_all(spec, question):
                 key = self._settled_choice(a, settled)
                 if not key:
                     continue
@@ -425,23 +433,56 @@ class AmbiguityResolver:
                 break
         return spec
 
-    async def _resolve_entities(self, spec: QuerySpec) -> tuple[QuerySpec, VendorMatch | None]:
-        vq = spec.filters.vendor_query
-        if not is_meaningful(vq):
-            if vq:
-                log.info("dropping generic vendor_query %r", vq)
-                spec = spec.patched(filters=spec.filters.model_copy(
-                    update={"vendor_query": None}).model_dump())
+    async def _rescue_lexical_miss(
+        self, spec: QuerySpec
+    ) -> tuple[QuerySpec, NoteEvent | None]:
+        """Retry a text filter semantically when it matched nothing at all.
+
+        This is the ONLY place the semantic index is read, and it fires only
+        after the lexical filter has already come back empty. That ordering is
+        the whole design: running semantic retrieval first was measured as a
+        regression on the stand-in, turning one confident candidate into eight
+        and a needless clarifying question. A fallback cannot do that, because
+        it never runs when LIKE succeeds.
+
+        "How much did we pay the electronics store?" is the case it exists for:
+        LIKE finds nothing, and cosine finds SELECTION ELECTRONICS DAHISAR EAST.
+
+        The substitution is always DISCLOSED. Silently answering about a
+        different name than the user typed would be the worst kind of helpful.
+        """
+        prof = get_profile()
+        if not settings.enable_semantic or not prof.semantic_sources:
             return spec, None
 
-        match = await resolve_vendor(vq, self.db)
-        if not match.candidates:
-            return spec, match
+        for source in prof.semantic_sources:
+            field = f"{source.entity_type}_like"
+            typed = getattr(spec.filters, field, None)
+            filt = prof.filters.get(field)
+            if not typed or filt is None:
+                continue
 
-        spec = spec.patched(filters=spec.filters.model_copy(
-            update={"vendor_ids": match.ids(all_candidates=False),
-                    "vendor_query": vq}).model_dump())
-        return spec, match
+            hits = await self.db.scalar(
+                f"SELECT COUNT(*) FROM {prof.fact} WHERE {filt.sql} LIKE %(p)s",
+                {"p": f"%{typed}%"},
+            )
+            if hits:
+                continue      # lexical worked; the index stays out of the way
+
+            found = await semantic_search(self.db, source.entity_type, typed, limit=3)
+            if not found:
+                continue
+
+            key, score = found[0]
+            log.info("semantic rescue: %r -> %r (cos=%.3f)", typed, key, score)
+            spec = spec.patched(filters=spec.filters.model_copy(
+                update={field: key}).model_dump())
+            return spec, NoteEvent(
+                kind="assumption",
+                text=(f"No {source.entity_type} matched “{typed}”. Answering for "
+                      f"“{key}”, the closest name in the data."),
+            )
+        return spec, None
 
     async def _probe_all(self, ambiguities: list[Ambiguity]) -> None:
         """Execute every interpretation concurrently. Cheap: indexed aggregates."""

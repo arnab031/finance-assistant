@@ -1,6 +1,6 @@
-# Ambiguity Resolution
+# Finsight — Ambiguity Resolution
 
-Design note for the TBX finance assistant. Companion to [PLAN.md](PLAN.md) §4, Layer 3.
+Design note for Finsight. Companion to [PLAN.md](PLAN.md) §4, Layer 3.
 
 ---
 

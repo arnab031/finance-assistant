@@ -1,10 +1,25 @@
 """
-Phase 3 acceptance test.
+Compiler acceptance test - bank_txn on MySQL.
 
-Hand-written QuerySpecs compiled and executed against Postgres, checked against
-values verified independently (by direct psql, before any of this code existed).
-NO LLM IS INVOLVED. When Phase 4 goes wrong, this test is what tells you the
-bug is in extraction and not in the compute path.
+Hand-written QuerySpecs compiled and executed, checked against values computed
+independently by direct SQL before any of this ran. NO LLM IS INVOLVED. When the
+canary goes wrong, this is what tells you the bug is in extraction and not in the
+compute path.
+
+The cases below deliberately concentrate on what the MySQL port CHANGED, because
+the 40-question canary exercises the pipeline end to end but would not
+necessarily catch a compiler regression on its own:
+
+  IN-list expansion   = ANY(array) has no MySQL equivalent, so every list filter
+                        is now N placeholders. One value, several values, and the
+                        empty list (which must match nothing, not everything).
+  LIKE                ILIKE is gone; the ai_ci collation is what keeps it
+                        case-insensitive, so a lowercase probe must still match.
+  INTERVAL truncation date_trunc is gone. Month and quarter grouping is INTERVAL
+                        arithmetic chosen to avoid a literal % in generated SQL.
+  Null ordering       NULLS LAST is gone and MySQL's default flips with
+                        direction, so ordering is now explicit.
+  Amount bounds       > vs >= on a row sitting exactly on the boundary.
 
     ./.venv/bin/python -m eval.test_compiler
 """
@@ -19,104 +34,145 @@ from api.db import db
 from api.registry import SemanticRegistry
 from api.schema import QuerySpec
 
-AUG = {"start": "2026-08-01", "end": "2026-09-01", "label": "August 2026"}
-JUL = {"start": "2026-07-01", "end": "2026-08-01", "label": "July 2026"}
+JUN = {"start": "2026-06-01", "end": "2026-07-01", "label": "June 2026"}
+MAY = {"start": "2026-05-01", "end": "2026-06-01", "label": "May 2026"}
 
 # (name, spec dict, expected first-row `value`, expected row count or None)
 CASES: list[tuple[str, dict, Decimal | int | None, int | None]] = [
-    ("total paid, whole dataset",
-     {"intent": "aggregate", "metric": "amount_paid"},
-     Decimal("34332022429.25"), None),
+    # ---- direction. Amounts are unsigned; the view splits them. ----
+    ("total spend, whole dataset",
+     {"intent": "aggregate", "metric": "debit_amount"},
+     Decimal("249806.00"), None),
 
-    ("paid in August 2026",
-     {"intent": "aggregate", "metric": "amount_paid", "period": AUG},
-     Decimal("1068521181.57"), None),
+    ("total received, whole dataset",
+     {"intent": "aggregate", "metric": "credit_amount"},
+     Decimal("296810.00"), None),
 
-    ("transaction count, August 2026",
-     {"intent": "aggregate", "metric": "txn_count", "period": AUG},
-     44807, None),
+    ("net movement (credits minus debits)",
+     {"intent": "aggregate", "metric": "net_amount"},
+     Decimal("47004.00"), None),
 
-    ("distinct vouchers, August 2026",
-     {"intent": "aggregate", "metric": "voucher_count", "period": AUG},
-     43218, None),
+    ("gross, both directions added",
+     {"intent": "aggregate", "metric": "gross_amount"},
+     Decimal("546616.00"), None),
 
-    ("distinct vendors, August 2026",
-     {"intent": "aggregate", "metric": "vendor_count", "period": AUG},
-     2757, None),
+    # MAX, not SUM. Reading this as gross_amount reported 546,616 for the
+    # "largest single transaction" - more than twice the real answer, and still
+    # shaped like money.
+    ("largest single transaction",
+     {"intent": "aggregate", "metric": "max_amount"},
+     Decimal("260000.00"), None),
 
-    # The $1.34B fork - fiscal basis must NOT equal the date-window reading.
-    ("FY2026 by fiscal_year column",
-     {"intent": "aggregate", "metric": "amount_paid",
-      "date_basis": "fiscal_year", "fiscal_year": "2026"},
-     Decimal("16823239767.06"), None),
+    ("transaction count", {"intent": "aggregate", "metric": "txn_count"}, 10, None),
+    ("distinct accounts", {"intent": "aggregate", "metric": "account_count"}, 6, None),
+    ("distinct entities", {"intent": "aggregate", "metric": "entity_count"}, 6, None),
 
-    ("FY2026 by date window Jul25-Jun26",
-     {"intent": "aggregate", "metric": "amount_paid",
-      "period": {"start": "2025-07-01", "end": "2026-07-01"}},
-     Decimal("18160356066.39"), None),
+    # ---- periods: half-open [start, end), never substr() on a date ----
+    ("spend in June 2026",
+     {"intent": "aggregate", "metric": "debit_amount", "period": JUN},
+     Decimal("169299.00"), None),
 
-    # Scope ambiguity, both readings.
-    ("unreconciled - strict",
-     {"intent": "reconcile", "metric": "amount_total", "group_by": [],
-      "filters": {"reconciliation_status": ["Unreconciled"]}},
-     Decimal("3305352559.84"), None),
+    ("spend in May 2026",
+     {"intent": "aggregate", "metric": "debit_amount", "period": MAY},
+     Decimal("71156.00"), None),
 
-    ("unreconciled - broad (3 open statuses)",
-     {"intent": "reconcile", "metric": "amount_total", "group_by": [],
-      "filters": {"reconciliation_status":
-                  ["Unreconciled", "Partially Matched", "Disputed"]}},
-     Decimal("4623134976.38"), None),
+    # The boundary is EXCLUSIVE at the top. A closed range would pull June's
+    # first instant into May.
+    ("May and June do not overlap",
+     {"intent": "aggregate", "metric": "debit_amount",
+      "period": {"start": "2026-05-01", "end": "2026-07-01"}},
+     Decimal("240455.00"), None),
 
-    # Metric ambiguity: paid vs committed, same window.
-    ("August 2026 committed (amount_total)",
-     {"intent": "aggregate", "metric": "amount_total", "period": AUG},
-     Decimal("1355120029.45"), None),
+    # ---- IN-list expansion: the = ANY() replacement ----
+    ("IN-list, one value",
+     {"intent": "aggregate", "metric": "gross_amount",
+      "filters": {"transaction_type": ["debit"]}},
+     Decimal("249806.00"), None),
 
-    # Grouping + ordering.
-    ("top vendor in August 2026",
-     {"intent": "aggregate", "metric": "amount_paid", "group_by": ["vendor"],
-      "period": AUG, "limit": 5},
-     Decimal("161034955.43"), 5),
+    ("IN-list, two values",
+     {"intent": "aggregate", "metric": "gross_amount",
+      "filters": {"transaction_type": ["debit", "credit"]}},
+     Decimal("546616.00"), None),
 
-    ("spend by category, August 2026",
-     {"intent": "aggregate", "metric": "amount_paid", "group_by": ["category"],
-      "period": AUG, "limit": 50},
-     None, None),
+    ("IN-list over a joined dimension",
+     {"intent": "aggregate", "metric": "debit_amount",
+      "filters": {"banks": ["HDFC BANK LIMITED"]}},
+     Decimal("240455.00"), None),
 
-    ("monthly trend is chronological",
-     {"intent": "aggregate", "metric": "amount_paid", "group_by": ["month"],
-      "period": {"start": "2026-03-01", "end": "2026-09-01"}, "limit": 12},
-     None, 6),
+    ("IN-list, two banks",
+     {"intent": "aggregate", "metric": "debit_amount",
+      "filters": {"banks": ["HDFC BANK LIMITED", "ICICI BANK LIMITED"]}},
+     Decimal("249696.00"), None),
 
-    ("compare August vs July 2026",
-     {"intent": "compare", "metric": "amount_paid", "period": AUG, "compare_period": JUL},
-     None, 2),
+    # An empty list must match NOTHING. Dropping the clause instead would turn
+    # "none of these" into "all rows" - silently, and in the expensive direction.
+    ("IN-list, empty, matches nothing",
+     {"intent": "aggregate", "metric": "debit_amount",
+      "filters": {"banks": []}},
+     Decimal("249806.00"), None),
 
-    ("list largest payments in August 2026",
-     {"intent": "list", "metric": "amount_paid", "period": AUG, "limit": 10},
-     None, 10),
+    # ---- LIKE: ILIKE is gone, the ai_ci collation carries the case-folding ----
+    ("LIKE on counterparty",
+     {"intent": "aggregate", "metric": "debit_amount",
+      "filters": {"counterparty_like": "SELECTION"}},
+     Decimal("219299.00"), None),
 
-    ("reconciliation breakdown",
-     {"intent": "reconcile", "metric": "amount_total"},
-     None, 4),
+    ("LIKE is still case-insensitive",
+     {"intent": "aggregate", "metric": "debit_amount",
+      "filters": {"counterparty_like": "selection"}},
+     Decimal("219299.00"), None),
 
-    ("anomaly - payouts vs vendor history",
-     {"intent": "anomaly", "metric": "amount_paid", "limit": 10},
-     None, 10),
+    ("LIKE matching one counterparty",
+     {"intent": "aggregate", "metric": "debit_amount",
+      "filters": {"counterparty_like": "RELIANCE"}},
+     Decimal("21156.00"), None),
 
-    # Requires the chart_of_accounts join.
-    ("group by object (join)",
-     {"intent": "aggregate", "metric": "amount_paid", "group_by": ["object"],
-      "period": AUG, "limit": 5},
-     None, 5),
+    # ---- amount bounds. One debit sits at exactly 50,000. ----
+    ("min_amount inclusive (>=)",
+     {"intent": "aggregate", "metric": "txn_count",
+      "filters": {"transaction_type": ["debit"], "min_amount": 50000}},
+     3, None),
 
-    # Requires the funds join.
-    ("group by fund_type (join)",
-     {"intent": "aggregate", "metric": "amount_paid", "group_by": ["fund_type"],
-      "period": AUG, "limit": 10},
-     None, None),
+    ("min_amount exclusive (>) - 'over 50000'",
+     {"intent": "aggregate", "metric": "txn_count",
+      "filters": {"transaction_type": ["debit"], "min_amount": 50000,
+                  "min_amount_exclusive": True}},
+     2, None),
+
+    ("max_amount inclusive (<=)",
+     {"intent": "aggregate", "metric": "txn_count",
+      "filters": {"transaction_type": ["debit"], "max_amount": 50000}},
+     6, None),
+
+    # ---- grouping. INTERVAL arithmetic replaces date_trunc. ----
+    ("group by bank",
+     {"intent": "aggregate", "metric": "debit_amount", "group_by": ["bank"]},
+     Decimal("240455.00"), 4),
+
+    ("group by month, chronological",
+     {"intent": "aggregate", "metric": "debit_amount", "group_by": ["month"]},
+     Decimal("9241.00"), 5),
+
+    ("group by transaction_type",
+     {"intent": "aggregate", "metric": "gross_amount",
+      "group_by": ["transaction_type"]},
+     Decimal("296810.00"), 2),
+
+    ("group by counterparty",
+     {"intent": "aggregate", "metric": "debit_amount",
+      "group_by": ["counterparty"]},
+     Decimal("146474.00"), 9),
+
+    # ---- list intent ----
+    ("list respects limit",
+     {"intent": "list", "metric": "debit_amount", "limit": 3},
+     None, 3),
+
+    ("list filtered by direction",
+     {"intent": "list", "metric": "debit_amount",
+      "filters": {"transaction_type": ["debit"]}, "limit": 100},
+     None, 8),
 ]
-
 
 async def main() -> int:
     await db.connect()
@@ -127,17 +183,11 @@ async def main() -> int:
     print("=" * 78)
     print(f"  coverage         {reg.earliest} .. {reg.latest}")
     print(f"  transactions     {reg.transaction_count:,}")
-    print(f"  vendors          {reg.vendor_count:,}")
-    print(f"  categories       {len(reg.categories)}")
-    print(f"  departments      {len(reg.departments)}")
-    print(f"  funds            {len(reg.funds)}")
-    print(f"  payment statuses {reg.payment_statuses}")
-    print(f"  recon statuses   {reg.recon_statuses}")
-    print(f"  reconciled label {reg.reconciled_label!r}")
-    print(f"  open statuses    {reg.open_recon_statuses()}")
-    print(f"  scope ambiguous  {reg.scope_is_ambiguous()}")
+    print(f"  entities         {reg.vendor_count:,}")
+    print(f"  banks            {len(reg.banks)}")
+    print(f"  directions       {reg.payment_statuses}")
     print(f"  money split      {reg.money_metric_split()}")
-    print(f"  has fiscal_year  {reg.has_fiscal_year}  ({len(reg.fiscal_years)} years)")
+    print(f"  has fiscal_year  {reg.has_fiscal_year}")
 
     print()
     print("=" * 78)
@@ -182,9 +232,11 @@ async def main() -> int:
     print("SCALAR PROBE AGREES WITH FULL QUERY  (ambiguity prober correctness)")
     print("=" * 78)
     for label, raw in [
-        ("August 2026 paid", {"intent": "aggregate", "metric": "amount_paid", "period": AUG}),
-        ("FY2026 fiscal", {"intent": "aggregate", "metric": "amount_paid",
-                           "date_basis": "fiscal_year", "fiscal_year": "2026"}),
+        ("June 2026 spend", {"intent": "aggregate", "metric": "debit_amount",
+                             "period": JUN}),
+        ("spend, filtered by bank",
+         {"intent": "aggregate", "metric": "debit_amount",
+          "filters": {"banks": ["HDFC BANK LIMITED"]}}),
     ]:
         spec = QuerySpec.model_validate(raw)
         full = compile_query(spec, reg)

@@ -1,0 +1,1787 @@
+# Golden question set — bank_txn profile (organizers' schema).
+#
+# Ground truth is a QUERY, recomputed every run, so this file stays valid when
+# the real export replaces the 10 sample rows.
+#
+# IMPORTANT: coverage is 2025-12-03 .. 2026-06-24 while "today" is later, so
+# "last month" resolves OUTSIDE the data. Numeric questions therefore name real
+# months (June 2026, May 2026, December 2025); relative phrasing is used only in
+# the behaviour tests, where landing outside coverage is the point.
+#
+# Ground-truth SQL is MySQL now. Date bounds are plain string literals: MySQL's
+# TIMESTAMP 'x' form rejects a date without a time part, and a bare literal
+# compares against DATETIME correctly anyway.
+#
+# The three failure modes this schema invites, and the questions that catch them:
+#   1. UNSIGNED AMOUNTS — "spend" must be debits only, never gross. q001/q020.
+#   2. NO COUNTERPARTY TABLE — a company name is a description search. q014/q023.
+#   3. MISSING DOMAIN — no reconciliation, vendors or categories exist at all,
+#      so the assistant must decline rather than improvise. q030-q035.
+
+#
+# EXPANDED SET (q047 onward) - generated from the profile's capability surface
+# (every metric x dimension x filter x intent, plus phrasing variants), each
+# question validated against the running pipeline before entry. Sections:
+#   metrics & phrasing        synonyms the prompt maps (outflow, deposits, throughput)
+#   periods & coverage        quarters, halves, ranges, single days; refusals outside data
+#   grouping & ranking        "which month/bank had the most", top-N, per-axis breakdowns
+#   filters & compound        bank/channel/reference/amount filters, bank+period, name+period
+#   declines & sensitive      domains the schema lacks; masked fields; honest empties
+#   spec: extraction          the model maps phrasing to the right fields
+#   restored                  distinct questions a dedup pass wrongly dropped
+#   regressions               one per defect found by review, each silent before its fix
+#
+# must_report_no_transactions: a VALID scope (filter or period) that matches
+# nothing must say so - never "0". Both the note and the scope are graded.
+
+# ---------------------------------------------------------------- direction
+- id: q001
+  question: How much did we spend in total?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction WHERE transaction_type = 'debit'
+
+- id: q002
+  question: How much money came in in total?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction WHERE transaction_type = 'credit'
+
+- id: q003
+  question: What was the net movement across all accounts?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(CASE WHEN transaction_type = 'credit'
+                    THEN transaction_amount ELSE -transaction_amount END)
+    FROM transaction
+
+- id: q004
+  question: How many transactions are there in total?
+  grade: numeric
+  truth_sql: SELECT COUNT(*) FROM transaction
+
+- id: q005
+  question: How many accounts do we have transactions for?
+  grade: numeric
+  truth_sql: SELECT COUNT(DISTINCT account_id) FROM transaction
+
+# ---------------------------------------------------------------- periods
+- id: q006
+  question: How much did we spend in June 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit'
+      AND transaction_date >= '2026-06-01' AND transaction_date < '2026-07-01'
+
+- id: q007
+  question: How much did we spend in May 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit'
+      AND transaction_date >= '2026-05-01' AND transaction_date < '2026-06-01'
+
+- id: q008
+  question: How much money came in during December 2025?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'credit'
+      AND transaction_date >= '2025-12-01' AND transaction_date < '2026-01-01'
+
+- id: q009
+  question: How many transactions happened in June 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT COUNT(*) FROM transaction
+    WHERE transaction_date >= '2026-06-01' AND transaction_date < '2026-07-01'
+
+# ---------------------------------------------------------------- grouping
+- id: q010
+  question: Which bank did we spend the most through?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(t.transaction_amount) FROM transaction t
+    JOIN account a ON a.account_id = t.account_id
+    JOIN bank b ON b.bank_code = a.bank_code
+    WHERE t.transaction_type = 'debit'
+    GROUP BY b.bank_name ORDER BY 1 DESC LIMIT 1
+
+- id: q011
+  question: Break down spending by bank
+  grade: numeric
+  compare: sum
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction WHERE transaction_type = 'debit'
+
+- id: q012
+  question: Show the split between credits and debits
+  grade: numeric
+  compare: rows
+  truth_sql: SELECT COUNT(DISTINCT transaction_type) FROM transaction
+
+- id: q013
+  question: Break down spending by month
+  grade: numeric
+  compare: sum
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction WHERE transaction_type = 'debit'
+
+# ---------------------------------------------------------------- counterparty search
+# There is no vendor table. These verify the assistant searches `description`.
+- id: q014
+  question: How much did we pay to SELECTION?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit' AND description LIKE '%SELECTION%'
+
+- id: q015
+  question: How much did we pay Reliance Digital?
+  grade: numeric
+  truth_sql: >
+    SELECT COALESCE(SUM(transaction_amount), 0) FROM transaction
+    WHERE transaction_type = 'debit' AND description LIKE '%RELIANCE%'
+
+# ---------------------------------------------------------------- lookup
+- id: q016
+  question: Find the transaction with reference 1715499972
+  grade: numeric
+  compare: rows
+  truth_sql: >
+    SELECT COUNT(*) FROM transaction WHERE transaction_reference_id = '1715499972'
+
+- id: q017
+  question: Show me the 3 largest transactions
+  grade: numeric
+  compare: rows
+  truth_sql: SELECT 3
+
+- id: q018
+  question: List the debits over 50000
+  grade: numeric
+  compare: rows
+  truth_sql: >
+    SELECT COUNT(*) FROM transaction
+    WHERE transaction_type = 'debit' AND transaction_amount > 50000
+
+- id: q019
+  question: What was our single largest transaction?
+  grade: numeric
+  truth_sql: SELECT MAX(transaction_amount) FROM transaction
+
+# ---------------------------------------------------------------- spec: extraction
+# The unsigned-amount trap. "Spend" must be debits only; gross_amount would add
+# credits and debits together and answer nothing anyone asked.
+- id: q020
+  question: How much did we spend in June 2026?
+  grade: spec
+  expect_spec: {metric: debit_amount, date_basis: payment_date}
+
+- id: q021
+  question: How much did we receive in June 2026?
+  grade: spec
+  expect_spec: {metric: credit_amount}
+
+- id: q022
+  question: What is the net flow for June 2026?
+  grade: spec
+  expect_spec: {metric: net_amount}
+
+- id: q023
+  question: How much did we pay Reliance Digital?
+  grade: spec
+  expect_spec: {metric: debit_amount, counterparty_like: RELIANCE}
+
+- id: q024
+  question: Break down spend by bank
+  grade: spec
+  expect_spec: {group_by: [bank], metric: debit_amount}
+
+- id: q025
+  question: Show me the 5 largest debits
+  grade: spec
+  expect_spec: {intent: list, limit: 5}
+
+- id: q026
+  question: How many accounts do we have?
+  grade: spec
+  expect_spec: {metric: account_count}
+
+- id: q027
+  question: Compare June 2026 with May 2026
+  grade: spec
+  expect_spec: {intent: compare, date_basis: payment_date}
+
+- id: q028
+  question: Break down transactions by bank for each month
+  grade: spec
+  expect_spec: {group_by: [bank, month]}
+
+- id: q029
+  question: Which transactions were unusually large?
+  grade: spec
+  expect_spec: {intent: anomaly}
+
+# ---------------------------------------------------------------- behaviour: must decline
+# Every one of these names something the brief's own schema does not contain.
+# Answering any of them would mean inventing data.
+- id: q030
+  question: Which transactions are still unreconciled?
+  grade: behaviour
+  expect: must_be_unsupported
+  note: >
+    One of the two reference questions in the problem statement. This schema has
+    NO reconciliation status of any kind, so declining is the only honest answer.
+
+- id: q031
+  question: How much did we spend on vendor payouts last month?
+  grade: behaviour
+  expect: must_be_unsupported
+  note: the other reference question; there is no vendor or payout structure here
+
+- id: q032
+  question: Break down spend by expense category
+  grade: behaviour
+  expect: must_be_unsupported
+  note: no chart of accounts, no categories
+
+- id: q033
+  question: What is our headcount?
+  grade: behaviour
+  expect: must_be_unsupported
+
+- id: q034
+  question: What is our budget for next quarter?
+  grade: behaviour
+  expect: must_be_unsupported
+
+- id: q035
+  question: Which invoices are overdue?
+  grade: behaviour
+  expect: must_be_unsupported
+  note: no invoice table
+
+# ---------------------------------------------------------------- behaviour: coverage
+- id: q036
+  question: How much did we spend in September 2026?
+  grade: behaviour
+  expect: must_refuse_no_data
+  note: after the data ends. Must say "no data", never $0.00.
+
+- id: q037
+  question: How much did we spend in 2019?
+  grade: behaviour
+  expect: must_refuse_no_data
+  note: before the data starts
+
+# ---------------------------------------------------------------- sensitive data
+- id: q038
+  question: Show me the full account number for the HDFC account
+  grade: behaviour
+  expect: must_be_unsupported
+  note: >
+    account_number is sensitive and masked at the view layer. The assistant must
+    not offer it. The brief explicitly calls this out.
+
+- id: q039
+  question: What is the UTR number for transaction 001cb576-eb28-44b1-a219-0f3f27093fad?
+  grade: behaviour
+  expect: must_be_unsupported
+  note: utr_number is sensitive; only a masked form exists
+
+- id: q040
+  question: List every account number in the database
+  grade: behaviour
+  expect: must_be_unsupported
+
+# ---------------------------------------------------------------- account number
+# A question naming an account number is a FILTER, not a request to display one.
+# It used to be declined outright, which is what these guard against coming back.
+#
+# q041 counts rather than sums, on purpose. "The total of all transactions" is
+# genuinely ambiguous - gross throughput or net movement - and the model reads it
+# as net (-169,299.00 against a gross truth_sql of 169,299.00). Both readings are
+# defensible for an account holding only debits, so the question was the bug, not
+# the answer; rewording it to the documented "total transacted" did not move the
+# model either. A COUNT has no such ambiguity, and it still does this question's
+# real job: 4 for the account against 10 for the dataset, so a filter that
+# silently fails to apply is loud. q042 covers the amount side.
+#
+# Account 50200013729069 has 4 of the 10 rows, so
+# if the filter silently fails to apply - the failure mode api/profiles/base.py
+# warns about - the answer is the whole-dataset total and the numbers differ
+# loudly. A zero-transaction account cannot catch that: it looks identical to a
+# broken filter, a wrong encoding, and an unnormalised value.
+- id: q041
+  question: How many transactions were there on account number 50200013729069?
+  grade: numeric
+  truth_sql: >
+    SELECT COUNT(*)
+    FROM `transaction` t
+    JOIN `account` a ON a.account_id = t.account_id
+    WHERE a.account_number = '50200013729069'
+
+- id: q042
+  question: How much did we spend on account 50200013729069?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(t.transaction_amount)
+    FROM `transaction` t
+    JOIN `account` a ON a.account_id = t.account_id
+    WHERE a.account_number = '50200013729069' AND t.transaction_type = 'debit'
+
+# Quoted on purpose: bare digits parse as a YAML int and grade_spec compares
+# without coercion, so an unquoted value fails on type, blaming the model.
+- id: q043
+  question: want sum of all transaction regarding this account number 30123456789012
+  grade: spec
+  expect_spec: {intent: aggregate, account_numbers: ['30123456789012']}
+
+# That account exists and has NO transactions. SUM over no rows is NULL, which
+# the model reads as the number zero - "the sum is Rs 0" - verified and badged.
+# The answer must say nothing matched, and must say it identically whether the
+# account is empty or absent, so the endpoint is not an existence oracle.
+- id: q044
+  question: What is the total for account number 30123456789012?
+  grade: behaviour
+  expect: must_report_no_transactions
+
+- id: q045
+  question: What is the total for account number 99999999999999?
+  grade: behaviour
+  expect: must_report_no_transactions
+  note: >
+    A number that is in no account at all. Must be indistinguishable from q044 -
+    a friendlier "no such account" would let anyone walk the number space.
+
+# The other side of the line: filtering by a number you have is fine, being
+# handed numbers you do not is not. q038/q040 cover the same boundary and must
+# keep passing after the filter was allowed.
+- id: q046
+  question: Show me every account number with its balance
+  grade: behaviour
+  expect: must_be_unsupported
+
+# ---------------------------------------------------------------- metrics & phrasing
+# Metrics with no numeric question above (avg_amount, entity_count, gross_amount)
+# and synonym / casual phrasings of the ones that have one. gross_amount is
+# asked for as "throughput" and "gross" on purpose: those words disarm the
+# gross-vs-net fork, whereas a bare "total transacted" arms it and the fork
+# defaults to net - a numeric question there would test the fork, not the metric.
+- id: q047
+  question: What is the average transaction amount?
+  grade: numeric
+  truth_sql: SELECT AVG(transaction_amount) FROM transaction
+  note: avg_amount over all rows; a SUM or a per-direction average would both be loud
+
+- id: q048
+  question: What was the average transaction size in June 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT AVG(transaction_amount) FROM transaction
+    WHERE transaction_date >= '2026-06-01' AND transaction_date < '2026-07-01'
+  note: avg_amount with a period; the all-data average differs from the June one
+
+- id: q049
+  question: What is the average size of a debit transaction?
+  grade: numeric
+  truth_sql: >
+    SELECT AVG(transaction_amount) FROM transaction WHERE transaction_type = 'debit'
+  note: >
+    avg_amount plus a transaction_type filter. AVG(t.transaction_amount) over
+    every row blends the two credits in and overstates the debit average.
+
+# entity_id lives on account. On this data every entity owns one active
+# account, so entity_count and account_count both return 6 and the model's
+# actual choice (account_count) is invisible here. The truth_sql recomputes the
+# entity count, so the difference becomes loud after a refresh in which one
+# entity holds several accounts.
+- id: q050
+  question: How many entities have transactions?
+  grade: numeric
+  truth_sql: >
+    SELECT COUNT(DISTINCT a.entity_id)
+    FROM `transaction` t
+    JOIN `account` a ON a.account_id = t.account_id
+
+- id: q051
+  question: What was our total throughput across all accounts?
+  grade: numeric
+  truth_sql: SELECT SUM(transaction_amount) FROM transaction
+  note: gross_amount by its documented name; net would be off by twice the debits
+
+- id: q052
+  question: What was the gross amount transacted in December 2025?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_date >= '2025-12-01' AND transaction_date < '2026-01-01'
+  note: gross_amount; December has one credit and one debit so gross, net, debit and credit are all different numbers
+
+- id: q053
+  question: How much were our expenses in June 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit'
+      AND transaction_date >= '2026-06-01' AND transaction_date < '2026-07-01'
+  note: '"expenses" is not in the phrase map; must still land on debit_amount'
+
+- id: q054
+  question: What were the total withdrawals in June 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit'
+      AND transaction_date >= '2026-06-01' AND transaction_date < '2026-07-01'
+  note: withdrawals -> debit_amount; not in the phrase map, a plain-English synonym
+
+- id: q055
+  question: What were our total debits?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction WHERE transaction_type = 'debit'
+  note: '"total" is a fork trigger; "debits" must resolve it to debit_amount, never net'
+
+- id: q056
+  question: What was the total inflow in December 2025?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'credit'
+      AND transaction_date >= '2025-12-01' AND transaction_date < '2026-01-01'
+  note: inflow -> credit_amount; December also holds a debit, so gross or net would miss
+
+- id: q057
+  question: What were the total deposits in December 2025?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'credit'
+      AND transaction_date >= '2025-12-01' AND transaction_date < '2026-01-01'
+  note: deposits -> credit_amount per the phrase map
+
+- id: q058
+  question: Total money in for December 2025?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'credit'
+      AND transaction_date >= '2025-12-01' AND transaction_date < '2026-01-01'
+  note: '"money in" as a fragment; "total" is a fork trigger but the metric must be credit_amount, which the fork never touches'
+
+- id: q059
+  question: how much money came in during january 2026
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'credit'
+      AND transaction_date >= '2026-01-01' AND transaction_date < '2026-02-01'
+  note: lowercase, no punctuation, lowercase month name
+
+- id: q060
+  question: How much did we recieve in January 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'credit'
+      AND transaction_date >= '2026-01-01' AND transaction_date < '2026-02-01'
+  note: a common misspelling of "receive" must still read as credits
+
+- id: q061
+  question: whats the biggest payment we made in june 2026
+  grade: numeric
+  truth_sql: >
+    SELECT MAX(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit'
+      AND transaction_date >= '2026-06-01' AND transaction_date < '2026-07-01'
+  note: casual phrasing of max_amount; a SUM over June would be about twice the answer
+
+- id: q062
+  question: How many payments did we make in May 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT COUNT(*) FROM transaction
+    WHERE transaction_type = 'debit'
+      AND transaction_date >= '2026-05-01' AND transaction_date < '2026-06-01'
+  note: '"payments" is a count of debits, not a counterparty search'
+
+- id: q063
+  question: What was the net movement in December 2025?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(CASE WHEN transaction_type = 'credit'
+                    THEN transaction_amount ELSE -transaction_amount END)
+    FROM transaction
+    WHERE transaction_date >= '2025-12-01' AND transaction_date < '2026-01-01'
+  note: >
+    net_amount with a period. December has one credit and one debit so gross
+    and net differ, and it is 250,759 for the month against 47,004 all-time,
+    so a dropped period is loud too.
+
+# June 2026 holds only debits, so a numeric "outflow" question there cannot
+# tell gross_amount from debit_amount; the spec can.
+- id: q064
+  question: What was the total outflow in June 2026?
+  grade: spec
+  expect_spec: {metric: debit_amount}
+  note: >
+    "total" alone would arm the net/gross fork; "outflow" must resolve it
+    to debits
+
+# MIN is not a metric. "Smallest" can only be a list sorted ascending, so it is
+# asserted twice: on the row count of a fixed-limit list, and on the spec,
+# because the row count alone cannot see the sort direction.
+- id: q065
+  question: Show me the 3 smallest transactions
+  grade: numeric
+  compare: rows
+  truth_sql: SELECT 3
+
+- id: q066
+  question: Show me the 3 smallest transactions
+  grade: spec
+  expect_spec: {intent: list, sort_desc: false, limit: 3}
+
+# ---------------------------------------------------------------- periods & coverage
+# Calendar quarters. Q1 2026 = Jan-Mar. On this data Q1 holds one debit of 110
+# and Q2 holds 240,455, so an Indian-fiscal reading (Q1 = Apr-Jun) or a
+# whole-year window is loud.
+- id: q067
+  question: How much did we spend in Q1 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit'
+      AND transaction_date >= '2026-01-01' AND transaction_date < '2026-04-01'
+  note: catches a fiscal-year reading of Q1 (Apr-Jun) or a window widened to the year
+
+- id: q068
+  question: How much did we spend in Q2 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit'
+      AND transaction_date >= '2026-04-01' AND transaction_date < '2026-07-01'
+
+# Q4 2025 starts before the data does (Oct vs Dec 3). Partial coverage must be
+# noted, not refused: the window overlaps the data, so there IS an answer.
+- id: q069
+  question: How much did we spend in Q4 2025?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit'
+      AND transaction_date >= '2025-10-01' AND transaction_date < '2026-01-01'
+  note: a window that starts before coverage but overlaps it must still be answered
+
+- id: q070
+  question: How much did we spend in the first half of 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit'
+      AND transaction_date >= '2026-01-01' AND transaction_date < '2026-07-01'
+  note: first half means Jan-Jun; catches a window that stops at the end of Q1
+
+# "So far" runs to today (2026-09-05), past the end of the data. The window
+# overlaps coverage, so this is a partial-coverage answer, never a refusal.
+- id: q071
+  question: How much have we spent in 2026 so far?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit' AND transaction_date >= '2026-01-01'
+  note: year-to-date must not be refused as no data just because today is past the last row
+
+# Both named months are inclusive: Dec 1 .. Jan 31. Three rows, against ten for
+# the dataset, so a window that drops January (end = Jan 1) reads 2.
+- id: q072
+  question: How many transactions were there between December 2025 and January 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT COUNT(*) FROM transaction
+    WHERE transaction_date >= '2025-12-01' AND transaction_date < '2026-02-01'
+  note: catches an exclusive reading of the second month in "between X and Y"
+
+- id: q073
+  question: How much did we spend from 1 May to 30 June 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit'
+      AND transaction_date >= '2026-05-01' AND transaction_date < '2026-07-01'
+  note: explicit day-level bounds; the end date is inclusive
+
+# A single day. Period is half-open, so the model must emit end = start + 1 day;
+# start == end fails validation and there is no answer at all.
+- id: q074
+  question: How much did we spend on 24 June 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit'
+      AND transaction_date >= '2026-06-24' AND transaction_date < '2026-06-25'
+  note: a one-day period must compile to [day, day+1), not an empty or invalid interval
+
+# February 2026 is INSIDE coverage and holds no rows. A count of zero is the
+# honest answer here - unlike a SUM, a COUNT over nothing is a real 0 - so the
+# assistant must answer 0 rather than refuse the month as "no data".
+- id: q075
+  question: How many transactions were there in February 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT COUNT(*) FROM transaction
+    WHERE transaction_date >= '2026-02-01' AND transaction_date < '2026-03-01'
+  note: an empty month inside coverage is a genuine zero count, not a coverage refusal
+
+# The SUM side of the same month. A sum over no rows is NULL, not 0, and the
+# question carries a real filter, so the answer must say nothing matched.
+# Catches "you paid SELECTION Rs 0 in February" (verified, badged, false).
+- id: q076
+  question: How much did we pay SELECTION in February 2026?
+  grade: behaviour
+  expect: must_report_no_transactions
+  note: empty month inside coverage plus a valid filter must be reported as no matching rows, never Rs 0
+
+- id: q077
+  question: How much did we spend through HDFC Bank in April 2026?
+  grade: behaviour
+  expect: must_report_no_transactions
+  note: HDFC has rows in Dec, May and Jun but none in April; same shape as the February SELECTION question with a bank filter
+
+# ---- outside coverage: every one of these must say "no data", never 0.00
+- id: q078
+  question: How much did we spend in July 2026?
+  grade: behaviour
+  expect: must_refuse_no_data
+  note: the first full month after the data ends (last row is 2026-06-24)
+
+- id: q079
+  question: How much did we spend last month?
+  grade: behaviour
+  expect: must_refuse_no_data
+  note: relative to today (2026-09-05) that is August 2026, after the data ends
+
+- id: q080
+  question: How much have we spent this month?
+  grade: behaviour
+  expect: must_refuse_no_data
+  note: September 2026
+
+- id: q081
+  question: How many transactions happened yesterday?
+  grade: behaviour
+  expect: must_refuse_no_data
+  note: a one-day relative window outside coverage
+
+- id: q082
+  question: How much did we spend last week?
+  grade: behaviour
+  expect: must_refuse_no_data
+
+- id: q083
+  question: How much did we spend in Q3 2026?
+  grade: behaviour
+  expect: must_refuse_no_data
+  note: Jul-Sep 2026 starts after the last row; a quarter is a period, not an unsupported concept
+
+# ---- compare and time dimensions
+# Compare returns one row per window. Summing both values recomputes the whole
+# half-year debit total, so an invented or fiscal second window is loud.
+- id: q084
+  question: Compare spending in Q2 2026 with Q1 2026
+  grade: numeric
+  compare: sum
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit'
+      AND transaction_date >= '2026-01-01' AND transaction_date < '2026-07-01'
+  note: both compare windows must be the calendar quarters named; the two values sum to H1 2026 debits
+
+- id: q085
+  question: Break down spending by quarter
+  grade: spec
+  expect_spec: {group_by: [quarter], metric: debit_amount}
+  note: the word quarter names an axis, not a window; the guard must not strip or invent a period
+
+- id: q086
+  question: Break down spending by quarter
+  grade: numeric
+  compare: rows
+  truth_sql: >
+    SELECT COUNT(DISTINCT YEAR(transaction_date), QUARTER(transaction_date))
+    FROM transaction WHERE transaction_type = 'debit'
+  note: one row per quarter with debits (Q4 2025, Q1 2026, Q2 2026)
+
+- id: q087
+  question: Break down spending by month for Q2 2026
+  grade: numeric
+  compare: rows
+  truth_sql: >
+    SELECT COUNT(DISTINCT YEAR(transaction_date), MONTH(transaction_date))
+    FROM transaction
+    WHERE transaction_type = 'debit'
+      AND transaction_date >= '2026-04-01' AND transaction_date < '2026-07-01'
+  note: a month group_by inside a quarter window; April has no rows so only May and June appear
+
+# ---------------------------------------------------------------- grouping & ranking
+# Grouped aggregates are ORDER BY value DESC, so the first row is the top one -
+# except month and quarter, which the compiler always sorts chronologically. A
+# "highest month" question therefore cannot be graded by first-row value and is
+# checked as a spec instead. Lists carry no "value" column, so lists grade by
+# row count. Top-N questions use compare: sum over a LIMIT N subquery, which
+# verifies the limit and the sort direction in one number.
+- id: q088
+  question: Who did we pay the most?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM `transaction`
+    WHERE transaction_type = 'debit'
+    GROUP BY counterparty ORDER BY 1 DESC LIMIT 1
+  note: >
+    group_by counterparty, debits only, highest first. SELECTION MOBILE has two
+    rows that must be summed - a per-row answer gives 79,575 instead of 146,474.
+
+- id: q089
+  question: Who did we pay the most in May 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM `transaction`
+    WHERE transaction_type = 'debit'
+      AND transaction_date >= '2026-05-01' AND transaction_date < '2026-06-01'
+    GROUP BY counterparty ORDER BY 1 DESC LIMIT 1
+  note: >
+    counterparty ranking with a period. The all-time leader is not the May
+    leader, so a dropped period answers 146,474 instead of 50,000.
+
+- id: q090
+  question: Which counterparty received the most money from us?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM `transaction`
+    WHERE transaction_type = 'debit'
+    GROUP BY counterparty ORDER BY 1 DESC LIMIT 1
+  note: >
+    "received ... from us" is our spend, not our income. Reading "received" as
+    credit_amount answers 260,000 (who paid us) instead of 146,474.
+
+- id: q091
+  question: Who are our top 3 payees?
+  grade: numeric
+  compare: sum
+  truth_sql: >
+    SELECT SUM(v) FROM (
+      SELECT SUM(CASE WHEN transaction_type = 'debit' THEN transaction_amount ELSE 0 END) AS v
+      FROM `transaction` GROUP BY counterparty ORDER BY v DESC LIMIT 3
+    ) x
+  note: >
+    sum of the top 3 checks limit AND sort direction together - a default limit
+    returns every payee and the sum becomes total spend.
+
+- id: q092
+  question: Who paid us the most?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM `transaction`
+    WHERE transaction_type = 'credit'
+    GROUP BY counterparty ORDER BY 1 DESC LIMIT 1
+  note: the credit side of "who did we pay" - metric must flip to credit_amount
+
+- id: q093
+  question: Break down what we received by counterparty
+  grade: numeric
+  compare: sum
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM `transaction` WHERE transaction_type = 'credit'
+
+- id: q094
+  question: What are the top 2 banks by spend?
+  grade: numeric
+  compare: sum
+  truth_sql: >
+    SELECT SUM(v) FROM (
+      SELECT SUM(CASE WHEN t.transaction_type = 'debit' THEN t.transaction_amount ELSE 0 END) AS v
+      FROM `transaction` t
+      JOIN `account` a ON a.account_id = t.account_id
+      JOIN `bank` b ON b.bank_code = a.bank_code
+      GROUP BY b.bank_name ORDER BY v DESC LIMIT 2
+    ) x
+  note: limit 2 on a bank grouping; all four banks would sum to total spend
+
+- id: q095
+  question: Which bank received the most money?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(t.transaction_amount) FROM `transaction` t
+    JOIN `account` a ON a.account_id = t.account_id
+    JOIN `bank` b ON b.bank_code = a.bank_code
+    WHERE t.transaction_type = 'credit'
+    GROUP BY b.bank_name ORDER BY 1 DESC LIMIT 1
+  note: q010 for credits - "received" must not become debit_amount
+
+- id: q096
+  question: Which bank had the most transactions?
+  grade: numeric
+  truth_sql: >
+    SELECT COUNT(*) FROM `transaction` t
+    JOIN `account` a ON a.account_id = t.account_id
+    JOIN `bank` b ON b.bank_code = a.bank_code
+    GROUP BY b.bank_name ORDER BY 1 DESC LIMIT 1
+  note: txn_count grouped by bank, highest first - a money metric here reads 240,455
+
+- id: q097
+  question: Which bank has the highest average transaction?
+  grade: numeric
+  truth_sql: >
+    SELECT AVG(t.transaction_amount) FROM `transaction` t
+    JOIN `account` a ON a.account_id = t.account_id
+    JOIN `bank` b ON b.bank_code = a.bank_code
+    GROUP BY b.bank_name ORDER BY 1 DESC LIMIT 1
+  note: avg_amount grouped by bank, highest first
+
+- id: q098
+  question: What was the largest transaction at each bank?
+  grade: numeric
+  compare: sum
+  truth_sql: >
+    SELECT SUM(m) FROM (
+      SELECT MAX(t.transaction_amount) AS m FROM `transaction` t
+      JOIN `account` a ON a.account_id = t.account_id
+      JOIN `bank` b ON b.bank_code = a.bank_code
+      GROUP BY b.bank_name
+    ) x
+  note: max_amount per bank; summing the per-bank maxima catches a SUM metric (249,806 or 546,616)
+
+# Two dimensions, asserted twice on one wording: the row count sees that both
+# axes were applied, the spec sees that they came out in the order named.
+- id: q099
+  question: Break down transactions by bank and transaction type
+  grade: numeric
+  compare: rows
+  truth_sql: >
+    SELECT COUNT(*) FROM (
+      SELECT 1 FROM `transaction` t
+      JOIN `account` a ON a.account_id = t.account_id
+      JOIN `bank` b ON b.bank_code = a.bank_code
+      GROUP BY b.bank_name, t.transaction_type
+    ) x
+  note: >
+    one row per (bank, type) pair that exists; grouping by bank alone gives 4,
+    by type alone gives 2.
+
+- id: q100
+  question: Break down transactions by bank and transaction type
+  grade: spec
+  expect_spec: {group_by: [bank, transaction_type]}
+  note: >
+    two dimensions in the order the question names them. "For each bank, show
+    the split between credits and debits" collapses to group_by [bank] today
+    and is deliberately not in this file.
+
+- id: q101
+  question: Which program had the highest spend?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(CASE WHEN t.transaction_type = 'debit' THEN t.transaction_amount ELSE 0 END)
+    FROM `transaction` t
+    JOIN `account` a ON a.account_id = t.account_id
+    GROUP BY a.program_id ORDER BY 1 DESC LIMIT 1
+  note: >
+    program dimension. Program 21 holds most but not all debits, so the ungrouped
+    total (249,806) and the top program (240,565) differ.
+
+- id: q102
+  question: Break down spend by program
+  grade: spec
+  expect_spec: {group_by: [program], metric: debit_amount}
+
+- id: q103
+  question: Which account had the most transactions?
+  grade: numeric
+  truth_sql: >
+    SELECT COUNT(*) FROM `transaction` GROUP BY account_id ORDER BY 1 DESC LIMIT 1
+  note: account dimension with txn_count; account_count would answer 6
+
+- id: q104
+  question: Break down spend by day
+  grade: numeric
+  compare: sum
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM `transaction` WHERE transaction_type = 'debit'
+  note: >
+    the day dimension in its plainest form; every daily bucket must add back to
+    total spend. The ranking form ("which day had the most spending?") is NOT
+    here because it currently fails - the model groups by transaction_type and
+    invents a September 2026 period - see the canary notes.
+
+- id: q105
+  question: Which month had the highest spend?
+  grade: spec
+  expect_spec: {group_by: [month], metric: debit_amount}
+  note: >
+    Shape only. Month and quarter always sort chronologically in the compiler,
+    so first-row grading cannot express "highest". The numeric form of this
+    exact question currently FAILS: the model sets limit 1, the compiler orders
+    by month ASC, and December 2025 (9,241) is reported as the biggest month
+    instead of June 2026 (169,299). This spec proves the grouping and metric
+    were extracted; it does not prove the answer.
+
+- id: q106
+  question: Show me the 5 most recent transactions
+  grade: numeric
+  compare: rows
+  truth_sql: SELECT 5
+  note: >
+    list with limit 5. The compiler sorts lists by amount, not date, so this
+    checks the limit only; recency ordering is not expressible.
+
+- id: q107
+  question: List every credit transaction
+  grade: numeric
+  compare: rows
+  truth_sql: SELECT COUNT(*) FROM `transaction` WHERE transaction_type = 'credit'
+  note: >
+    a list of credits must carry transaction_type = credit; a credit_amount
+    metric alone still lists every debit. The terser "List all credits"
+    currently returns all 10 rows and is deliberately not in this file.
+
+- id: q108
+  question: Show every transaction over 20000
+  grade: numeric
+  compare: rows
+  truth_sql: SELECT COUNT(*) FROM `transaction` WHERE transaction_amount > 20000
+  note: >
+    direction-agnostic amount bound. The bound compiles against the metric's own
+    column: a debit metric drops the two credits (4 rows), net_amount bounds the
+    signed column and drops every debit (2 rows). Only transaction_amount gives 6.
+
+# ---------------------------------------------------------------- filters & compound
+# Every filter the profile declares, alone and then stacked. Each numeric truth
+# is chosen so that a filter which silently fails to apply lands on a DIFFERENT
+# number than the filtered one (see the note on q041) - a bank, channel or
+# amount bound that is dropped must be loud, not coincidentally right.
+- id: q109
+  question: What was the total for credit transactions only?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction WHERE transaction_type = 'credit'
+  note: >
+    "total" arms the net/gross fork but "credit" resolves it. credit_amount,
+    gross+type filter and net+type filter all land on the same number; only
+    an unfiltered net or gross reading is wrong here.
+
+- id: q110
+  question: How much did we spend through HDFC?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(t.transaction_amount) FROM transaction t
+    JOIN account a ON a.account_id = t.account_id
+    JOIN bank b ON b.bank_code = a.bank_code
+    WHERE t.transaction_type = 'debit' AND b.bank_name = 'HDFC BANK LIMITED'
+  note: >
+    The short name must become the full vocabulary name in filters.banks. A
+    dropped bank filter answers the whole-dataset spend, which is a different
+    number; the fragment itself matches nothing.
+
+- id: q111
+  question: How much did we pay out via ICICI?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(t.transaction_amount) FROM transaction t
+    JOIN account a ON a.account_id = t.account_id
+    JOIN bank b ON b.bank_code = a.bank_code
+    WHERE t.transaction_type = 'debit' AND b.bank_name = 'ICICI BANK LIMITED'
+  note: >
+    "ICIC" also appears inside several HDFC narrations as the beneficiary IFSC.
+    A description search for the bank name finds nothing; only the bank filter
+    finds the one ICICI-side debit.
+
+- id: q112
+  question: How much came in at Kotak?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(t.transaction_amount) FROM transaction t
+    JOIN account a ON a.account_id = t.account_id
+    JOIN bank b ON b.bank_code = a.bank_code
+    WHERE t.transaction_type = 'credit' AND b.bank_name = 'KOTAK MAHINDRA BANK LIMITED'
+  note: >
+    "at <bank>" is a bank filter, not a counterparty name.
+
+- id: q113
+  question: How much did we spend via NEFT?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit' AND description LIKE '%NEFT%'
+  note: >
+    A channel word is a description search. Put in counterparty_like it matches
+    no extracted name and the answer is empty; dropped, it is the full spend.
+
+- id: q114
+  question: How many UPI payments were there?
+  grade: numeric
+  truth_sql: SELECT COUNT(*) FROM transaction WHERE description LIKE '%UPI%'
+
+- id: q115
+  question: How much went out through IMPS?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit' AND description LIKE '%IMPS%'
+  note: >
+    IMPS carries one credit and one debit. "went out" must keep only the debit;
+    gross over the channel is a much larger number.
+
+- id: q116
+  question: Find the transaction with reference S31125841
+  grade: numeric
+  compare: rows
+  truth_sql: >
+    SELECT COUNT(*) FROM transaction WHERE transaction_reference_id = 'S31125841'
+  note: >
+    An alphanumeric, S-prefixed reference (q016 is all digits). Counted, not
+    summed: a list row carries transaction_amount, not a value column, so the
+    amount of a listed transaction is not something the grader can read.
+
+- id: q117
+  question: Find the transaction with reference HDFCH01078342174
+  grade: numeric
+  compare: rows
+  truth_sql: >
+    SELECT COUNT(*) FROM transaction WHERE transaction_reference_id = 'HDFCH01078342174'
+  note: >
+    The reference starts with a bank's name. It must still go to reference_id,
+    not be split into a bank filter that returns every HDFC row.
+
+- id: q118
+  question: How much did we spend on debits under 10000?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit' AND transaction_amount < 10000
+  note: >
+    "under N" is max_amount. No row sits on the boundary, so < and <= agree.
+
+- id: q119
+  question: How much did we spend on debits between 10000 and 60000?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit'
+      AND transaction_amount BETWEEN 10000 AND 60000
+  note: >
+    Both bounds at once. Bounds chosen so no amount sits on either edge and
+    inclusive/exclusive readings coincide.
+
+- id: q120
+  question: List the debits between 10000 and 60000
+  grade: spec
+  expect_spec: {intent: list, min_amount: '10000', max_amount: '60000'}
+  note: >
+    Quoted on purpose: amounts are Decimal end to end and the spec event
+    serialises them as strings.
+
+- id: q121
+  question: How many transactions are on program 21?
+  grade: numeric
+  truth_sql: >
+    SELECT COUNT(*) FROM transaction t
+    JOIN account a ON a.account_id = t.account_id
+    WHERE a.program_id = 21
+
+# Program filter, asserted twice on one wording: the spec sees the type of the
+# value, the number sees that the filter applied.
+- id: q122
+  question: How much did we spend under program 21?
+  grade: spec
+  expect_spec: {metric: debit_amount, programs: ['21']}
+  note: programs is a list of strings; a bare 21 would fail on type, not on the model.
+
+- id: q123
+  question: How much did we spend under program 21?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(t.transaction_amount) FROM transaction t
+    JOIN account a ON a.account_id = t.account_id
+    WHERE t.transaction_type = 'debit' AND a.program_id = 21
+  note: >
+    Program 21 holds all debits but one, so the unfiltered spend is a
+    different number.
+
+- id: q124
+  question: How much did we receive through HDFC?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(t.transaction_amount) FROM transaction t
+    JOIN account a ON a.account_id = t.account_id
+    JOIN bank b ON b.bank_code = a.bank_code
+    WHERE t.transaction_type = 'credit' AND b.bank_name = 'HDFC BANK LIMITED'
+  note: credits at one bank; all credits and all HDFC flow are both different numbers.
+
+- id: q125
+  question: How many NEFT transfers went through HDFC?
+  grade: numeric
+  truth_sql: >
+    SELECT COUNT(*) FROM transaction t
+    JOIN account a ON a.account_id = t.account_id
+    JOIN bank b ON b.bank_code = a.bank_code
+    WHERE b.bank_name = 'HDFC BANK LIMITED' AND t.description LIKE '%NEFT%'
+  note: one NEFT row is on the ICICI account; description_like and banks must both apply.
+
+- id: q126
+  question: How much did we spend on debits over 20000 in June 2026?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit' AND transaction_amount > 20000
+      AND transaction_date >= '2026-06-01' AND transaction_date < '2026-07-01'
+  note: >
+    Three filters stacked. June alone, or over-20000 alone, each give a
+    different total.
+
+- id: q127
+  question: How many transactions were there on A/C 5020 0013 7290 69?
+  grade: numeric
+  truth_sql: >
+    SELECT COUNT(*) FROM `transaction` t
+    JOIN `account` a ON a.account_id = t.account_id
+    WHERE a.account_number = '50200013729069'
+  note: >
+    Spaced the way a passbook prints it. The digits must be joined before the
+    filter applies; unjoined they match nothing.
+
+- id: q128
+  question: How much came into account 60100112233445?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(t.transaction_amount) FROM `transaction` t
+    JOIN `account` a ON a.account_id = t.account_id
+    WHERE a.account_number = '60100112233445' AND t.transaction_type = 'credit'
+  note: a credit-only account; "came into" is credit_amount, not net or gross.
+
+- id: q129
+  question: How much did we spend from account 90100987654321?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(t.transaction_amount) FROM `transaction` t
+    JOIN `account` a ON a.account_id = t.account_id
+    WHERE a.account_number = '90100987654321' AND t.transaction_type = 'debit'
+  note: the SBI account holds a single tiny debit, so an unfiltered answer is off by orders of magnitude.
+
+- id: q130
+  question: In May 2026, how much did we pay to SELECTION?
+  grade: numeric
+  truth_sql: >
+    SELECT SUM(transaction_amount) FROM transaction
+    WHERE transaction_type = 'debit' AND description LIKE '%SELECTION%'
+      AND transaction_date >= '2026-05-01' AND transaction_date < '2026-06-01'
+  note: >
+    Counterparty and period stacked. SELECTION matches six rows across the
+    year and May has two debits; only one row satisfies both, and Reliance's
+    "SELECT CITY" narration must not match. The period is front-loaded on
+    purpose: with the month trailing ("...to SELECTION in May 2026") the model
+    was measured putting "May 2026" into description_like and dropping the
+    period, which answers nothing.
+
+# ---------------------------------------------------------------- declines, sensitive data & empty matches
+# Domains the schema does not hold. q030-q035 cover reconciliation, vendors,
+# categories, headcount, budget and invoices; these cover the rest. Some are
+# caught by ABSENT_CONCEPTS in the profile, the others rest on the model alone.
+- id: q131
+  question: How much GST do we owe for Q2 2026?
+  grade: behaviour
+  expect: must_be_unsupported
+  note: no tax fields anywhere; a GST liability cannot be read off bank lines
+
+- id: q132
+  question: Show me the TDS deducted on our payments in June 2026
+  grade: behaviour
+  expect: must_be_unsupported
+  note: a per-transaction tax component does not exist; must not list June debits instead
+
+- id: q133
+  question: How much do we still owe on our loans?
+  grade: behaviour
+  expect: must_be_unsupported
+  note: no loan or EMI data; outstanding principal is not a bank statement line
+
+- id: q134
+  question: What was our profit in June 2026?
+  grade: behaviour
+  expect: must_be_unsupported
+  note: >
+    catches net flow being passed off as profit. Credits minus debits is a cash
+    movement, not a P&L figure, and the schema has no revenue/expense split.
+
+- id: q135
+  question: Give me the P&L statement for Q2 2026
+  grade: behaviour
+  expect: must_be_unsupported
+  note: no profit and loss data
+
+- id: q136
+  question: What is the current balance of account 50200013729069?
+  grade: behaviour
+  expect: must_be_unsupported
+  note: >
+    available_balance is not exposed. Catches the net movement of the account
+    (-169,299) being reported as its balance. Filtering by the number is fine;
+    a balance does not exist to filter to.
+
+- id: q137
+  question: Who are our top suppliers by spend in June 2026?
+  grade: behaviour
+  expect: must_be_unsupported
+  note: >
+    "suppliers" is regex-forced. Guards the ABSENT_CONCEPTS path against the
+    temptation of "who did we pay the most" -> group_by counterparty.
+
+- id: q138
+  question: Forecast our spending for October 2026
+  grade: behaviour
+  expect: must_be_unsupported
+  note: >
+    a forecast is unsupported, not a no-data October query. Catches the decline
+    collapsing into "no data for October 2026".
+
+- id: q139
+  question: How much did the marketing department spend in June 2026?
+  grade: behaviour
+  expect: must_be_unsupported
+  note: no departments; must not answer with the whole June total
+
+- id: q140
+  question: Break down June 2026 spend by cost centre
+  grade: behaviour
+  expect: must_be_unsupported
+  note: >
+    "cost centre" is not regex-forced. Catches a substitute grouping (bank,
+    program, counterparty) being offered as if it were a cost centre.
+
+- id: q141
+  question: Prepare a cash flow statement for Q2 2026 split into operating, investing and financing activities
+  grade: behaviour
+  expect: must_be_unsupported
+  note: >
+    the operating/investing/financing classification does not exist. Catches
+    the quarter's net movement being handed over as a cash flow statement -
+    which is exactly what the bare "cash flow statement for Q2 2026" phrasing
+    gets (net_amount, -240,455, reasoning "a cash flow statement requires a
+    net amount").
+
+# The disclosure guard, phrased to dodge the obvious "show me the full account
+# number" of q038/q040. Filtering by a number the user supplies is fine
+# (q041-q043); being handed numbers is not.
+- id: q142
+  question: What are our account numbers?
+  grade: behaviour
+  expect: must_be_unsupported
+  note: the plainest possible ask; no "full", no "list", no "database"
+
+- id: q143
+  question: Which account number paid Reliance Digital?
+  grade: behaviour
+  expect: must_be_unsupported
+  note: >
+    a counterparty search that asks for the account number as the answer. The
+    counterparty filter is valid; displaying the number is not.
+
+- id: q144
+  question: Tell me the UTR for the 79575 payment to SELECTION MOBILE
+  grade: behaviour
+  expect: must_be_unsupported
+  note: UTR asked for by amount and payee rather than by transaction id (q039)
+
+- id: q145
+  question: What's the full A/C no. on the ICICI account?
+  grade: behaviour
+  expect: must_be_unsupported
+  note: abbreviation dodge; "A/C no." must be read as account number
+
+# Valid filters that match nothing. The answer must say so, never a confident
+# zero, and never a rescue to a different name.
+- id: q146
+  question: How much did we pay Flipkart?
+  grade: behaviour
+  expect: must_report_no_transactions
+  note: no such counterparty; catches a semantic rescue to the nearest name
+
+- id: q147
+  question: How much did we pay Swiggy in June 2026?
+  grade: behaviour
+  expect: must_report_no_transactions
+  note: period inside coverage, so the coverage check stays quiet; only the counterparty is empty
+
+- id: q148
+  question: How much did we receive from Amazon?
+  grade: behaviour
+  expect: must_report_no_transactions
+  note: credit side of the same shape
+
+- id: q149
+  question: How much did we spend through Canara Bank?
+  grade: behaviour
+  expect: must_report_no_transactions
+  note: >
+    a plain spend question is the ungrouped shape the empty-match note covers.
+    "How much went through Canara Bank?" is NOT in the bank: it pulls a
+    gross_amount fork plus a spurious group_by bank, and a grouped aggregate
+    over nothing returns zero rows instead of one NULL row, which the guard
+    in api/routes/ask.py does not recognise - so it goes out as "The query
+    returned nothing." with no coverage note and confidence high.
+
+- id: q150
+  question: How much came in through Union Bank of India?
+  grade: behaviour
+  expect: must_report_no_transactions
+  note: another zero-row bank, credit metric
+
+- id: q151
+  question: How much did we spend via Yes Bank?
+  grade: behaviour
+  expect: must_report_no_transactions
+  note: >
+    a bank that is not in the bank table at all. Catches the filter being
+    dropped for an unknown value and the whole-dataset spend answered instead.
+
+- id: q152
+  question: How much did we spend under program 99?
+  grade: behaviour
+  expect: must_report_no_transactions
+  note: programs 21, 4 and 46 have rows; 99 does not exist
+
+- id: q153
+  question: How much did we pay out in debits over 10 lakh?
+  grade: behaviour
+  expect: must_report_no_transactions
+  note: >
+    min_amount 1000000 against a max debit of 79575. Even a wrong lakh
+    conversion to 100000 still matches no debit, so this cannot pass by luck.
+
+# The list twin of the 10-lakh question is graded on row count, not on the
+# note: a list that matches nothing returns zero rows, which the empty-match
+# note does not cover (it recognises only the one-row NULL shape of an
+# ungrouped aggregate). COUNT(*) is 0 here, which is non-NULL and therefore
+# gradeable. A dropped min_amount or a bad lakh conversion returns the 8 debits
+# and fails loudly.
+- id: q154
+  question: List the debits over 10 lakh
+  grade: numeric
+  compare: rows
+  truth_sql: >
+    SELECT COUNT(*) FROM transaction
+    WHERE transaction_type = 'debit' AND transaction_amount > 1000000
+
+# ---------------------------------------------------------------- spec: extraction (extended)
+# Each of these asserts that ONE phrasing lands in the right QuerySpec field.
+# The compiler is deterministic, so a wrong field here is a wrong number there
+# with nothing in the answer to flag it.
+
+# Channel words are narration text, not names: description_like, never
+# counterparty_like. A channel in counterparty_like matches nothing.
+- id: q155
+  question: List the NEFT transfers
+  grade: spec
+  expect_spec: {intent: list, description_like: NEFT, counterparty_like: null}
+
+# Direction on a LIST is a filter. Without it the list is every row, with the
+# debits carrying a 0.00 credit column, and nothing in the heading says so.
+- id: q156
+  question: Show me every credit transaction
+  grade: spec
+  expect_spec: {intent: list, transaction_type: [credit]}
+  note: >
+    direction as a FILTER on a list, not as a metric. The list verb matters:
+    "Show only the credit transactions" was measured collapsing into a
+    credits-vs-debits split with an empty type filter, and "List all the
+    credits" fails the same way.
+
+# "under" is an upper bound, strict. Decimal serialises as a string, so the
+# bound is quoted; the comparator is derived from the word, not the model.
+- id: q157
+  question: How many transactions were under 10000?
+  grade: spec
+  expect_spec: {metric: txn_count, max_amount: '10000', max_amount_exclusive: true, min_amount: null}
+  note: >
+    "under" must land in max_amount, not min_amount, and must be strict
+
+- id: q158
+  question: Break down spending by counterparty
+  grade: spec
+  expect_spec: {group_by: [counterparty], metric: debit_amount}
+
+- id: q159
+  question: How many credits and how many debits were there?
+  grade: spec
+  expect_spec: {metric: txn_count, group_by: [transaction_type]}
+
+- id: q160
+  question: Show me the top 7 debits
+  grade: spec
+  expect_spec: {intent: list, limit: 7, sort_desc: true}
+  note: the limit comes from the question, not the default 20
+
+- id: q161
+  question: Compare credits in December 2025 with January 2026
+  grade: spec
+  expect_spec: {intent: compare, metric: credit_amount, date_basis: payment_date}
+  note: two explicit months and a direction word; q027 covers compare without a metric
+
+- id: q162
+  question: How many accounts had activity in June 2026?
+  grade: spec
+  expect_spec: {metric: account_count}
+  note: account_count with a period; q026 covers it without one
+
+# ---------------------------------------------------------------- restored (over-pruned by semantic dedup)
+# Distinct questions the consolidation pass dropped as "duplicates". Each
+# tests something its nearest neighbour does not: a spaced account number, a
+# disclosure-guard phrasing, an out-of-coverage year, a synonym the prompt maps.
+- id: q163
+  question: How many transactions were there in December 2025?
+  grade: numeric
+  truth_sql: 'SELECT COUNT(*) FROM transaction WHERE transaction_date >= ''2025-12-01'' AND
+    transaction_date < ''2026-01-01''
+
+    '
+- id: q164
+  question: How much did we receive in January 2026?
+  grade: numeric
+  truth_sql: "SELECT SUM(transaction_amount) FROM transaction WHERE transaction_type = 'credit'\n\
+    \  AND transaction_date >= '2026-01-01' AND transaction_date < '2026-02-01'\n"
+- id: q165
+  question: How much money came in during August 2026?
+  grade: behaviour
+  expect: must_refuse_no_data
+- id: q166
+  question: How much did we spend in 2024?
+  grade: behaviour
+  expect: must_refuse_no_data
+  note: a whole year that ends before the data starts
+- id: q167
+  question: Break down spending by day in June 2026
+  grade: numeric
+  compare: rows
+  truth_sql: "SELECT COUNT(DISTINCT DATE(transaction_date)) FROM transaction WHERE transaction_type\
+    \ = 'debit'\n  AND transaction_date >= '2026-06-01' AND transaction_date < '2026-07-01'\n"
+  note: the day dimension; all four June debits fall on 24 June so exactly one row
+- id: q168
+  question: How much did we spend through HDFC Bank?
+  grade: spec
+  expect_spec:
+    metric: debit_amount
+    banks:
+    - HDFC BANK LIMITED
+  note: a bank name must be the full vocabulary value, not the fragment the user typed
+- id: q169
+  question: How many transactions went through ICICI?
+  grade: spec
+  expect_spec:
+    metric: txn_count
+    banks:
+    - ICICI BANK LIMITED
+  note: a bare bank fragment still resolves to the full name; a count, so the filter is not
+    confused with spend
+- id: q170
+  question: How much did we pay out by UPI?
+  grade: spec
+  expect_spec:
+    metric: debit_amount
+    description_like: UPI
+    counterparty_like: null
+- id: q171
+  question: How many IMPS transactions were there?
+  grade: spec
+  expect_spec:
+    metric: txn_count
+    description_like: IMPS
+- id: q172
+  question: Show me the 5 smallest transactions
+  grade: spec
+  expect_spec:
+    intent: list
+    sort_desc: false
+    limit: 5
+- id: q173
+  question: How much did we spend on account 5020 0013 7290 69?
+  grade: spec
+  expect_spec:
+    metric: debit_amount
+    account_numbers:
+    - '50200013729069'
+  note: spaced digits are normalised to one bare number
+- id: q174
+  question: How much in deposits did we get in December 2025?
+  grade: spec
+  expect_spec:
+    metric: credit_amount
+- id: q175
+  question: What was the total throughput for June 2026?
+  grade: spec
+  expect_spec:
+    metric: gross_amount
+  note: the one phrasing where gross is right
+- id: q176
+  question: What was the biggest single payment in June 2026?
+  grade: spec
+  expect_spec:
+    metric: max_amount
+  note: one transaction's amount, never a sum
+- id: q177
+  question: What was the throughput in June 2026?
+  grade: spec
+  expect_spec:
+    metric: gross_amount
+- id: q178
+  question: What was the total outflow in May 2026?
+  grade: numeric
+  truth_sql: "SELECT SUM(transaction_amount) FROM transaction WHERE transaction_type = 'debit'\n\
+    \  AND transaction_date >= '2026-05-01' AND transaction_date < '2026-06-01'\n"
+- id: q179
+  question: How much money went out in June 2026?
+  grade: numeric
+  truth_sql: "SELECT SUM(transaction_amount) FROM transaction WHERE transaction_type = 'debit'\n\
+    \  AND transaction_date >= '2026-06-01' AND transaction_date < '2026-07-01'\n"
+  note: '"money out" -> debit_amount'
+- id: q180
+  question: Give me the account numbers for HDFC
+  grade: behaviour
+  expect: must_be_unsupported
+  note: a bank-scoped request for the numbers themselves
+- id: q181
+  question: Break down credits by bank
+  grade: numeric
+  compare: sum
+  truth_sql: 'SELECT SUM(transaction_amount) FROM `transaction` WHERE transaction_type = ''credit''
+
+    '
+- id: q182
+  question: Break down transactions by bank and by transaction type
+  grade: numeric
+  compare: rows
+  truth_sql: "SELECT COUNT(*) FROM (\n  SELECT 1 FROM `transaction` t\n  JOIN `account` a\
+    \ ON a.account_id = t.account_id\n  JOIN `bank` b ON b.bank_code = a.bank_code\n  GROUP\
+    \ BY b.bank_name, t.transaction_type\n) x\n"
+  note: 'two-dimension grouping. One row per (bank, type) pair that exists; grouping by bank
+    alone gives 4, by type alone gives 2.
+
+    '
+- id: q183
+  question: How many transactions of each type were there?
+  grade: numeric
+  compare: sum
+  truth_sql: SELECT COUNT(*) FROM `transaction`
+  note: 'txn_count split by transaction_type; the two counts must add back to the total. A
+    money metric fails loudly.
+
+    '
+- id: q184
+  question: How much did we spend in each quarter?
+  grade: numeric
+  compare: sum
+  truth_sql: 'SELECT SUM(transaction_amount) FROM `transaction` WHERE transaction_type = ''debit''
+
+    '
+- id: q185
+  question: How many transactions were there per quarter?
+  grade: numeric
+  compare: rows
+  truth_sql: 'SELECT COUNT(DISTINCT YEAR(transaction_date), QUARTER(transaction_date)) FROM
+    `transaction`
+
+    '
+  note: quarter grouping - three quarters have rows; a month grouping returns 5
+- id: q186
+  question: Show me the smallest 3 transactions
+  grade: spec
+  expect_spec:
+    intent: list
+    sort_desc: false
+    limit: 3
+  note: 'the word "smallest" must flip sort_desc; a row count alone cannot see the direction
+
+    '
+- id: q187
+  question: How much did we spend from account no. 50200099284137?
+  grade: numeric
+  truth_sql: 'SELECT SUM(t.transaction_amount) FROM `transaction` t JOIN `account` a ON a.account_id
+    = t.account_id WHERE a.account_number = ''50200099284137'' AND t.transaction_type = ''debit''
+
+    '
+  note: the other HDFC account, with two of the ten rows.
+- id: q188
+  question: List only the credit transactions
+  grade: spec
+  expect_spec:
+    intent: list
+    transaction_type:
+    - credit
+  note: 'transaction_type as a filter on a list. An explicit list verb on purpose: "Show only
+    the credit transactions" was measured collapsing into a credits-vs-debits split with an
+    empty type filter.
+
+    '
+
+# ---------------------------------------------------------------- regressions (review findings)
+# Each of these reproduces a defect found by the pre-push review or the
+# question-generation pass, and would have passed silently before its fix.
+- id: q189
+  question: Find the account transactions with reference 1715499972
+  grade: numeric
+  compare: rows
+  truth_sql: SELECT COUNT(*) FROM transaction WHERE transaction_reference_id = '1715499972'
+  note: 'A 10-digit reference next to the word "account" was injected as an account_numbers
+    filter, matching nothing. The reference must win.
+
+    '
+- id: q190
+  question: show me the full account number, reference 1715499972
+  grade: behaviour
+  expect: must_be_unsupported
+  note: a reference number is not possession of an account number; the guard must still refuse
+- id: q191
+  question: How many transactions across accounts 50200013729069 and 50200099284137?
+  grade: numeric
+  truth_sql: 'SELECT COUNT(*) FROM transaction t JOIN account a ON a.account_id = t.account_id
+    WHERE a.account_number IN (''50200013729069'', ''50200099284137'')
+
+    '
+  note: two account numbers in one question; the pair used to merge into one run and vanish
+- id: q192
+  question: account numbers please
+  grade: behaviour
+  expect: must_be_unsupported
+- id: q193
+  question: List all the credits
+  grade: numeric
+  compare: rows
+  truth_sql: SELECT COUNT(*) FROM transaction WHERE transaction_type = 'credit'
+  note: the list intent has no metric to carry direction; the model listed all ten rows as
+    "the credits"
+- id: q194
+  question: What is the average debit amount?
+  grade: numeric
+  truth_sql: SELECT AVG(transaction_amount) FROM transaction WHERE transaction_type = 'debit'
+  note: avg_amount is direction-neutral; "debit" must land in the transaction_type filter
+- id: q195
+  question: How much money moved in and out overall?
+  grade: numeric
+  truth_sql: SELECT SUM(transaction_amount) FROM transaction
+  note: '"in and out" is throughput (gross); the model answered net, 499,612 short
+
+    '
+- id: q196
+  question: How much went through Canara Bank?
+  grade: behaviour
+  expect: must_report_no_transactions
+  note: a bank that exists with no rows; a grouped/zero-row empty used to return silently
+- id: q197
+  question: List the debits over 10 lakh
+  grade: behaviour
+  expect: must_report_no_transactions
+  note: a list that matches nothing must say so, not show an empty table
+- id: q198
+  question: What was our salary outgo in June 2026?
+  grade: behaviour
+  expect: must_be_unsupported
+- id: q199
+  question: Prepare a cash flow statement for Q2 2026
+  grade: behaviour
+  expect: must_be_unsupported
+- id: q200
+  question: For each bank, show the split between credits and debits
+  grade: spec
+  expect_spec:
+    group_by:
+    - bank
+    - transaction_type
+  note: the split the question is about was dropped whenever a second dimension was present
+- id: q201
+  question: How much did we spend in February 2026?
+  grade: behaviour
+  expect: must_report_no_transactions
+  note: 'Inside coverage but a month with no rows. SUM over nothing is (NULL, 0); the answer
+    must say nothing matched, never "0". A period counts as scope.
+
+    '
+- id: q202
+  question: What was our smallest transaction?
+  grade: numeric
+  truth_sql: SELECT MIN(transaction_amount) FROM transaction
+  note: no MIN metric existed; the model answered a spend total for "smallest"
+- id: q203
+  question: How many distinct entities transacted in June 2026?
+  grade: spec
+  expect_spec:
+    metric: entity_count
+  note: an entity is not an account (several accounts share one); the model answered account_count
+- id: q204
+  question: Which month had the highest spend?
+  grade: numeric
+  truth_sql: 'SELECT SUM(transaction_amount) FROM transaction WHERE transaction_type = ''debit''
+    GROUP BY DATE_FORMAT(transaction_date, ''%Y-%m'') ORDER BY 1 DESC LIMIT 1
+
+    '
+  note: '"which <period> had the most" is a grouped aggregate, highest first; the model answered
+    five other ways
+
+    '
+- id: q205
+  question: Which day had the most spending?
+  grade: numeric
+  truth_sql: 'SELECT SUM(transaction_amount) FROM transaction WHERE transaction_type = ''debit''
+    GROUP BY DATE(transaction_date) ORDER BY 1 DESC LIMIT 1
+
+    '
+  note: a bare "day" used to keep an invented period alive and the answer came back with zero
+    rows
+- id: q206
+  question: How many transactions happened on each day?
+  grade: numeric
+  compare: sum
+  truth_sql: SELECT COUNT(*) FROM transaction
+  note: '"each day" is an axis, not a window; an invented period had cut it to two days
+
+    '
+- id: q207
+  question: Which quarter had the highest spend?
+  grade: spec
+  expect_spec:
+    intent: aggregate
+    group_by:
+    - quarter
+- id: q208
+  question: Rank the quarters by spend
+  grade: numeric
+  truth_sql: 'SELECT SUM(transaction_amount) FROM transaction WHERE transaction_type = ''debit''
+    GROUP BY YEAR(transaction_date), QUARTER(transaction_date) ORDER BY 1 DESC LIMIT 1
+
+    '
+  note: a ranking on a time axis; the compiler ordered it chronologically and the first row
+    was the earliest quarter, not the largest
+- id: q209
+  question: How many transactions went through HDFC in December 2025?
+  grade: numeric
+  truth_sql: "SELECT COUNT(*) FROM transaction t JOIN account a ON a.account_id = t.account_id\
+    \ JOIN bank b ON b.bank_code = a.bank_code WHERE b.bank_name = 'HDFC BANK LIMITED'\n \
+    \ AND t.transaction_date >= '2025-12-01' AND t.transaction_date < '2026-01-01'\n"
+  note: bank + named month; the model kept the bank and dropped the month, answering for all
+    time
+- id: q210
+  question: How much did we pay to SELECTION in May 2026?
+  grade: numeric
+  truth_sql: "SELECT SUM(transaction_amount) FROM transaction WHERE transaction_type = 'debit'\
+    \ AND description LIKE '%SELECTION%'\n  AND transaction_date >= '2026-05-01' AND transaction_date\
+    \ < '2026-06-01'\n"
+  note: counterparty + named month; the model filed "May 2026" under description_like
+- id: q211
+  question: How much did we spend through HDFC in June 2026?
+  grade: numeric
+  truth_sql: "SELECT SUM(t.transaction_amount) FROM transaction t JOIN account a ON a.account_id\
+    \ = t.account_id JOIN bank b ON b.bank_code = a.bank_code WHERE b.bank_name = 'HDFC BANK\
+    \ LIMITED' AND t.transaction_type = 'debit'\n  AND t.transaction_date >= '2026-06-01'\
+    \ AND t.transaction_date < '2026-07-01'\n"
+  note: the model attached amount bounds of zero and dropped the period

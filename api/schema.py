@@ -17,9 +17,12 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Annotated, Any, Literal, get_args
+from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args
 
 from pydantic import BaseModel, Field, ValidationInfo, model_validator
+
+if TYPE_CHECKING:
+    from api.profiles.base import Filt
 
 # --------------------------------------------------------------------------
 # Closed vocabularies
@@ -29,16 +32,13 @@ from pydantic import BaseModel, Field, ValidationInfo, model_validator
 # guardrail layer 1 (PLAN.md §4) and it costs nothing.
 # --------------------------------------------------------------------------
 
-Dimension = Literal[
-    "vendor", "category", "account", "object", "department",
-    "fund", "fund_type", "program", "month", "quarter",
-    "fiscal_year", "payment_status", "reconciliation_status",
-]
-
-Metric = Literal[
-    "amount_paid", "amount_total", "amount_pending", "amount_retainage",
-    "txn_count", "voucher_count", "vendor_count", "avg_amount",
-]
+# Dimensions and metrics are DATASET-SPECIFIC, so they cannot be Literal types -
+# the organizers' schema has banks and credit/debit where the stand-in has
+# vendors and a chart of accounts. They stay closed sets, just closed against
+# the active profile instead of against a hardcoded tuple: an invented dimension
+# still fails validation before it can reach the database.
+Dimension = str
+Metric = str
 
 Intent = Literal[
     "aggregate",    # one number, optionally grouped
@@ -73,11 +73,13 @@ class Period(BaseModel):
 
 
 class Filters(BaseModel):
-    # Raw user text, pre-resolution. The compiler never sees this - entity
-    # resolution turns it into vendor_ids first (resolve/entities.py).
-    vendor_query: str | None = None
-    vendor_ids: list[str] = Field(default_factory=list)
-
+    # These belong to no filter the active profile declares, so the extraction
+    # schema never offers them and the compiler never reads them. They are kept
+    # because the REGISTRY still populates the vocabularies behind them - the
+    # bank profile maps payment_statuses to credit/debit - and because they are
+    # where a future dataset plugs its own dimensions in. vendor_query and
+    # vendor_ids were removed outright: nothing populated or read them once the
+    # vendor resolver went.
     categories: list[str] = Field(default_factory=list)
     departments: list[str] = Field(default_factory=list)
     funds: list[str] = Field(default_factory=list)
@@ -85,8 +87,35 @@ class Filters(BaseModel):
     payment_status: list[str] = Field(default_factory=list)
     reconciliation_status: list[str] = Field(default_factory=list)
 
+    # --- bank-statement dataset ---
+    # No counterparty table exists there, so a company name is a text search
+    # against `description` rather than a foreign key.
+    counterparty_like: str | None = None
+    description_like: str | None = None
+    transaction_type: list[str] = Field(default_factory=list)
+    banks: list[str] = Field(default_factory=list)
+    account_ids: list[str] = Field(default_factory=list)
+    # The account NUMBER, which is not account_id: the id is an internal UUID,
+    # the number is what a person reads off a statement and types into the box.
+    # Filtering by one is not a disclosure - the value came FROM the asker - so
+    # this is deliberately answerable while displaying a full number is not.
+    account_numbers: list[str] = Field(default_factory=list)
+    entity_ids: list[str] = Field(default_factory=list)
+    reference_id: list[str] = Field(default_factory=list)
+
     min_amount: Decimal | None = None
     max_amount: Decimal | None = None
+
+    # "over 50000" excludes a transaction of exactly 50000; "at least 50000"
+    # includes it. Both phrasings are ordinary, and on this data the difference
+    # was a whole row out of three.
+    #
+    # These are NOT in the extraction schema. The model emits only the number;
+    # the comparator is derived from the question text in extract.py, because
+    # the distinction is carried by two English words and a regex reads them
+    # more reliably than a 7B model does.
+    min_amount_exclusive: bool = False
+    max_amount_exclusive: bool = False
 
 
 class QuerySpec(BaseModel):
@@ -118,6 +147,13 @@ class QuerySpec(BaseModel):
     compare_fiscal_year: str | None = None
 
     sort_desc: bool = True
+    # How a grouped result is ordered when the axis is TIME. Trends read
+    # chronologically whatever sort_desc says - that is deliberate, or "break
+    # down by month" would come back newest-first. But "which month had the
+    # highest spend?" is a ranking, and chronological order answered it with the
+    # first month rather than the largest. Set only by the extraction
+    # correctors, never offered to the model; None keeps the trend behaviour.
+    order: Literal["chronological", "value"] | None = None
     limit: Annotated[int, Field(ge=1, le=200)] = 20
 
     # Populated by the extractor, surfaced in the provenance panel.
@@ -125,6 +161,29 @@ class QuerySpec(BaseModel):
     ambiguities: list[str] = Field(default_factory=list)
 
     # ---- invariants -------------------------------------------------------
+
+    @model_validator(mode="after")
+    def _known_vocabulary(self) -> "QuerySpec":
+        """Guardrail layer 1, now profile-aware."""
+        from api.profiles.base import get_profile
+
+        prof = get_profile()
+        if self.metric not in prof.metrics:
+            raise ValueError(
+                f"unknown metric {self.metric!r}; "
+                f"this dataset has: {', '.join(prof.metric_names())}"
+            )
+        unknown = [d for d in self.group_by if d not in prof.dimensions]
+        if unknown:
+            raise ValueError(
+                f"unknown dimension(s) {unknown}; "
+                f"this dataset has: {', '.join(prof.dimension_names())}"
+            )
+        if self.intent in prof.disabled_intents:
+            raise ValueError(
+                f"intent {self.intent!r} is not supported by this dataset"
+            )
+        return self
 
     @model_validator(mode="after")
     def _reconcile_date_fields(self, info: ValidationInfo) -> "QuerySpec":
@@ -218,8 +277,29 @@ class QuerySpec(BaseModel):
 # --------------------------------------------------------------------------
 
 
+def _filter_schema(filt: "Filt") -> dict[str, Any]:
+    """One filter's JSON Schema declaration, keyed off how it compiles."""
+    if filt.kind == "text":
+        return {"type": "string", "description": filt.hint}
+    if filt.kind == "number":
+        return {"type": "number", "description": filt.hint}
+    out = {"type": "array", "items": {"type": "string"}, "description": filt.hint}
+    if filt.max_items:
+        # Declared to the decoder; enforced again in api/extract.py because
+        # llama.cpp's grammar conversion does not reliably honour maxItems.
+        out["maxItems"] = filt.max_items
+    return out
+
+
 def extraction_schema() -> dict[str, Any]:
-    """JSON Schema constraining LLM call #1. Flat and self-contained."""
+    """JSON Schema constraining LLM call #1. Flat and self-contained.
+
+    Enums are read from the active profile, so the model is offered only the
+    dimensions and metrics that actually exist in the loaded dataset.
+    """
+    from api.profiles.base import get_profile
+
+    prof = get_profile()
     period = {
         "type": "object",
         "properties": {
@@ -234,12 +314,14 @@ def extraction_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "properties": {
-            "intent": {"type": "string", "enum": list(get_args(Intent))},
-            "metric": {"type": "string", "enum": list(get_args(Metric))},
+            "intent": {"type": "string",
+                       "enum": [i for i in get_args(Intent)
+                                if i not in prof.disabled_intents]},
+            "metric": {"type": "string", "enum": prof.metric_names()},
             "group_by": {
                 "type": "array",
                 "maxItems": 3,
-                "items": {"type": "string", "enum": list(get_args(Dimension))},
+                "items": {"type": "string", "enum": prof.dimension_names()},
             },
             "date_basis": {"type": "string", "enum": list(get_args(DateBasis))},
             "period": period,
@@ -251,19 +333,13 @@ def extraction_schema() -> dict[str, Any]:
             "compare_fiscal_year": {"type": "string"},
             "filters": {
                 "type": "object",
+                # Built from the ACTIVE PROFILE. Hardcoding this block meant the
+                # model could not emit a field the dataset actually had:
+                # counterparty_like was absent from the schema, so constrained
+                # decoding blocked it and every "how much did we pay X" question
+                # silently returned the unfiltered total.
                 "properties": {
-                    "vendor_query": {
-                        "type": "string",
-                        "description": (
-                            "Company name ONLY. Leave absent for generic phrases "
-                            "like 'vendor payouts', 'suppliers', 'top vendors'."
-                        ),
-                    },
-                    "categories": strings,
-                    "departments": strings,
-                    "funds": strings,
-                    "payment_status": strings,
-                    "reconciliation_status": strings,
+                    name: _filter_schema(filt) for name, filt in prof.filters.items()
                 },
             },
             "sort_desc": {"type": "boolean"},
@@ -291,6 +367,15 @@ class StageEvent(BaseModel):
     stage: Stage
 
 
+class ThreadEvent(BaseModel):
+    """First frame of every response. A client that sent no thread_id gets the
+    server-generated one here and should send it back on the next question -
+    without it, settled ambiguity choices cannot be loaded."""
+
+    type: Literal["thread"] = "thread"
+    thread_id: str
+
+
 class SpecEvent(BaseModel):
     type: Literal["spec"] = "spec"
     spec: QuerySpec
@@ -300,7 +385,7 @@ class ClarifyOption(BaseModel):
     key: str
     label: str
     detail: str
-    preview: str  # "$16,823,239,767.06 - 511,237 transactions"
+    preview: str  # "₹16,82,32,39,767.06 · 5,11,237 transactions"
 
 
 class ClarifyEvent(BaseModel):
@@ -352,6 +437,15 @@ class DoneEvent(BaseModel):
     type: Literal["done"] = "done"
     message_id: str
     confidence: Literal["high", "medium", "low"]
+    # What the answer cost, in the pipeline's own measure. The breakdown table
+    # already shows sql_ms, but that is the DATABASE step alone - single-digit
+    # milliseconds - while the wait a person actually experiences is the two
+    # model calls around it. Showing only the fast number invites the reader to
+    # think the system is instant and something else is slow.
+    total_ms: int = 0
+    extract_ms: int = 0      # LLM call #1: question -> typed spec
+    sql_ms: int = 0          # the database
+    narrate_ms: int = 0      # LLM call #2, including verification and any retry
 
 
 class ErrorEvent(BaseModel):
@@ -362,7 +456,7 @@ class ErrorEvent(BaseModel):
 
 
 Event = Annotated[
-    StageEvent | SpecEvent | ClarifyEvent | SqlEvent | RowsEvent
+    ThreadEvent | StageEvent | SpecEvent | ClarifyEvent | SqlEvent | RowsEvent
     | TokenEvent | VerifiedEvent | NoteEvent | DoneEvent | ErrorEvent,
     Field(discriminator="type"),
 ]
@@ -376,12 +470,18 @@ Event = Annotated[
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     thread_id: str | None = None
+    # Which model answers THIS question. Absent means the configured default.
+    # Validated against EVAL_MODELS server-side, so the field cannot be used to
+    # make the daemon reach for an arbitrary name.
+    model: str | None = None
 
 
 class ClarifyRequest(BaseModel):
     thread_id: str
     ambiguity_id: str
     chosen_key: str
+    # Carried so resolving an ambiguity continues on the model that raised it.
+    model: str | None = None
 
 
 class Coverage(BaseModel):
@@ -389,4 +489,4 @@ class Coverage(BaseModel):
     latest: date
     transaction_count: int
     total_paid: Decimal
-    currency: str = "USD"
+    currency: str = "INR"

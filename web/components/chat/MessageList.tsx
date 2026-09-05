@@ -28,8 +28,8 @@ export default function MessageList({
         <div className="empty">
           <h2 className="empty-title">Ask about your financial data</h2>
           <p className="empty-sub">
-            Every answer is computed by SQL against Postgres and checked against
-            the result before you see it.
+            Every answer is computed by SQL against the ledger and checked
+            against the result before you see it.
           </p>
           <div className="suggestions">
             {suggestions.map((s) => (

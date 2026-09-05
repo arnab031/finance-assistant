@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Architecture — Grounded Finance Assistant</title>
+<title>Architecture — Finsight</title>
 <style>
   :root {
     --ground:#f6f7f6; --surface:#fff; --surface-2:#f0f2f1;
@@ -70,15 +70,15 @@
   ul { margin:0 0 12px; padding-left:20px; max-width:70ch; }
   li { margin-bottom:5px; }
 </style>
-</head>
-<body>
+</head><body>
 <div class="page">
 
 <header>
-  <h1>Grounded Finance Assistant</h1>
-  <p class="sub">Architecture walkthrough — TBX / BVP Tech Catalyst.</p>
+  <h1>Finsight</h1>
+  <p class="sub">Architecture walkthrough — team Finsight, TBX / BVP Tech Catalyst.
+     Companion to <code>README.md</code>.</p>
   <p class="thesis">
-    The model decides <em>what</em> to compute. Postgres computes it. The model's
+    The model decides <em>what</em> to compute. MySQL computes it. The model's
     words are then checked against the result before anyone sees them.
     No number the assistant states can originate from the model.
   </p>
@@ -98,7 +98,7 @@
   <tbody>
     <tr><td>Model produces</td><td>Free-form SQL</td><td>A small typed JSON object</td></tr>
     <tr><td>Can emit invalid SQL?</td><td>Yes</td><td><span class="k">No</span> — Python writes the SQL</td></tr>
-    <tr><td>Can invent a number?</td><td>Yes</td><td><span class="k">No</span> — arithmetic only in Postgres</td></tr>
+    <tr><td>Can invent a number?</td><td>Yes</td><td><span class="k">No</span> — arithmetic only in MySQL</td></tr>
     <tr><td>Small-model reliability</td><td>Poor — generation is hard</td><td><span class="k">Good</span> — extraction is easy</td></tr>
     <tr><td>Guardrails attach</td><td>After generation, awkwardly</td><td><span class="k">Before compute</span>, on a typed object</td></tr>
   </tbody>
@@ -106,16 +106,17 @@
 </div>
 
 <p>
-  That reframe is also why a 7B model is viable: we ask it to do <strong>extraction</strong>,
-  not <strong>generation</strong>. Filling a fixed schema is what small models are good at.
-  The 20&nbsp;% model-efficiency criterion turns from a constraint into an advantage.
+  That reframe is also why a 7.6&nbsp;B model is viable: we ask it to do
+  <strong>extraction</strong>, not <strong>generation</strong>. Filling a fixed schema is what
+  small models are good at. The 20&nbsp;% model-efficiency criterion turns from a constraint
+  into an advantage.
 </p>
 
 <h2><span class="n">02</span>The request pipeline</h2>
 
 <figure>
 <svg viewBox="0 0 820 700" role="img"
-     aria-label="Vertical pipeline: a question passes through an LLM extraction step, then deterministic validation, entity and ambiguity resolution, SQL compilation, execution in Postgres where all arithmetic happens, a second LLM step that narrates the resulting rows, and a verification gate that checks every number against those rows before the answer is shown. Ambiguity can branch out to ask the user; failed verification loops back to regenerate.">
+     aria-label="Vertical pipeline: a question passes through an LLM extraction step, then deterministic validation, entity and ambiguity resolution, SQL compilation, execution in MySQL where all arithmetic happens, a second LLM step that narrates the resulting rows, and a verification gate that checks every number against those rows before the answer is shown. Ambiguity can branch out to ask the user; failed verification loops back to regenerate.">
   <defs>
     <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5"
             markerWidth="6" markerHeight="6" orient="auto-start-reverse">
@@ -138,7 +139,7 @@
     <rect x="140" y="20" width="280" height="52" rx="8" fill="none"
           stroke="currentColor" stroke-width="1.2" opacity="0.5"/>
     <text x="280" y="43" font-size="13" text-anchor="middle" font-weight="600">User question</text>
-    <text x="280" y="60" font-size="11" text-anchor="middle" opacity="0.6">“Spend by fund type last quarter”</text>
+    <text x="280" y="60" font-size="11" text-anchor="middle" opacity="0.6">“How much did we spend in June 2026?”</text>
     <line x1="280" y1="72" x2="280" y2="90" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar)"/>
 
     <!-- 2 extract (LLM) -->
@@ -160,7 +161,7 @@
     <rect x="140" y="236" width="280" height="52" rx="8" fill="none"
           stroke="currentColor" stroke-width="1.2"/>
     <text x="280" y="259" font-size="13" text-anchor="middle" font-weight="600">Resolve</text>
-    <text x="280" y="276" font-size="11" text-anchor="middle" opacity="0.7">vendors · coverage · ambiguity probes</text>
+    <text x="280" y="276" font-size="11" text-anchor="middle" opacity="0.7">counterparty · coverage · ambiguity probes</text>
 
     <!-- branch: clarify -->
     <line x1="420" y1="262" x2="472" y2="262" stroke="currentColor"
@@ -181,13 +182,13 @@
     <text x="280" y="348" font-size="11" text-anchor="middle" opacity="0.7">pure Python · bound parameters only</text>
     <line x1="280" y1="360" x2="280" y2="378" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar)"/>
 
-    <!-- 6 postgres -->
+    <!-- 6 mysql -->
     <rect x="140" y="380" width="280" height="52" rx="8" fill="var(--accent-soft)"
           stroke="var(--accent)" stroke-width="1.8"/>
     <text x="280" y="403" font-size="13" text-anchor="middle" font-weight="660"
-          fill="var(--accent-ink)">PostgreSQL</text>
+          fill="var(--accent-ink)">MySQL 8.4</text>
     <text x="280" y="420" font-size="11" text-anchor="middle" fill="var(--accent-ink)"
-          opacity="0.85">every SUM and GROUP BY, in NUMERIC(18,2)</text>
+          opacity="0.85">every SUM and GROUP BY, in DECIMAL(15,2)</text>
     <line x1="280" y1="432" x2="280" y2="450" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar)"/>
     <text x="292" y="446" font-size="9.5" opacity="0.65">result rows</text>
 
@@ -233,52 +234,58 @@
 </svg>
 <figcaption>
   Exactly two model calls per question, and neither one can put a number on screen:
-  the first produces a typed spec, the second may only restate rows Postgres computed.
+  the first produces a typed spec, the second may only restate rows MySQL computed.
 </figcaption>
 </figure>
 
 <p>
   The ordering has a deliberate consequence for the UI. Rows are emitted at the
-  Postgres step, <strong>before</strong> narration begins — so real numbers appear on
-  screen at ~3.7&nbsp;s while the prose is still being written. It reads as fast, and it
+  MySQL step, <strong>before</strong> narration begins — so real numbers appear on
+  screen while the prose is still being written. It reads as fast, and it
   reinforces visually that the figures came from the database.
 </p>
+
+<div class="cards">
+  <div class="card"><div class="big">2</div><div class="lbl">model calls per question</div></div>
+  <div class="card"><div class="big">0</div><div class="lbl">model calls for ambiguity handling</div></div>
+  <div class="card"><div class="big">4.1 s</div><div class="lbl">p50 end-to-end · p95 14.2 s</div></div>
+  <div class="card"><div class="big">46/46</div><div class="lbl">golden canary, qwen2.5:7b</div></div>
+</div>
 
 <h2><span class="n">03</span>Where wrong answers get stopped</h2>
 <p class="lede">
   Accuracy and grounding is the largest single criterion at 30&nbsp;%. Five layers, each
-  cheap, each catching a different failure. Every figure below was measured against our
-  1,019,354-row build.
+  cheap, each catching a different failure. Every example below is from this database.
 </p>
 
 <div class="tbl-wrap">
 <table>
-  <thead><tr><th>Layer</th><th>Catches</th><th>Measured example</th></tr></thead>
+  <thead><tr><th>Layer</th><th>Catches</th><th>Example on this data</th></tr></thead>
   <tbody>
     <tr>
       <td><strong>1 · Schema</strong><br><span style="color:var(--ink-3)">pydantic</span></td>
       <td>Invented dimensions, metrics, statuses; contradictory date fields</td>
-      <td>Model paired a fiscal year with an Apr–Mar window — rejected, repaired on retry</td>
+      <td>A metric outside the declared set never compiles — it is rejected and repaired on retry</td>
     </tr>
     <tr>
       <td><strong>2 · Sanity pass</strong><br><span style="color:var(--ink-3)">deterministic</span></td>
       <td>Right shape, wrong question — and filters nobody asked for</td>
-      <td>“last quarter” routed to a whole fiscal year: <span class="warn">$16.8B instead of $5.1B</span></td>
+      <td>“spend” routed to <code>gross_amount</code>: <span class="warn">₹5,46,616 instead of ₹2,49,806</span>, because gross adds credits to debits</td>
     </tr>
     <tr>
       <td><strong>3 · Coverage</strong></td>
       <td>Periods outside the data</td>
-      <td>“December 2026” returns <em>no data for that period</em> — never <code>$0.00</code></td>
+      <td>“last month” returns <em>No data for August 2026. Coverage runs 2025-12-03 to 2026-06-24</em> — never <code>₹0.00</code></td>
     </tr>
     <tr>
       <td><strong>4 · Ambiguity</strong><br><span style="color:var(--ink-3)">probe, then decide</span></td>
       <td>Questions with two defensible answers</td>
-      <td>“FY2026” differs by <span class="warn">$1,337,116,299</span> between readings</td>
+      <td>“the total for this account” — net movement or throughput? Both are priced before either is shown</td>
     </tr>
     <tr>
       <td><strong>5 · Provenance</strong><br><span style="color:var(--ink-3)">post-narration</span></td>
       <td>Any figure in the prose absent from the rows</td>
-      <td>A <span class="warn">$1 error</span> on a $1.07B total is caught; “$1.07 billion” is accepted</td>
+      <td>Verification failure drops confidence to <span class="warn">low</span> and replaces the prose with a template built from the rows</td>
     </tr>
   </tbody>
 </table>
@@ -287,8 +294,8 @@
 <h3>Layer 4 is the one worth explaining slowly</h3>
 <p>
   Ambiguity is not a property of the question — it is a property of the question
-  <em>against this data</em>. “How much did we spend last month” is ambiguous in principle
-  (paid vs committed); if pending is zero that month it is not ambiguous in fact, and
+  <em>against this data</em>. “How much did we spend last month” is ambiguous in principle;
+  if the competing readings land on the same number it is not ambiguous in fact, and
   asking is friction.
 </p>
 <p>
@@ -300,17 +307,28 @@
 </p>
 
 <div class="callout">
-  <strong>The correction worth mentioning to judges.</strong> Percentage alone was the wrong
-  test. The FY2026 fork measures only 7.4&nbsp;% — below our ask threshold — but 7.4&nbsp;%
-  of $18B is <strong>$1.34 billion</strong>. A second trigger now fires on absolute gap
-  (0.5&nbsp;% of total spend, so it scales with whatever dataset is loaded).
+  <strong>Percentage alone was the wrong test.</strong> A fork can sit below the ask
+  threshold in percentage terms and still be worth crores in absolute terms. A second
+  trigger now fires on absolute gap — 0.5&nbsp;% of total spend, so it scales with whatever
+  dataset is loaded.
 </div>
+
+<h3>The trap that produced a confident, verified, false answer</h3>
+<p>
+  <code>SUM()</code> over nothing returns <strong>one row</strong> — <code>(NULL, 0)</code> —
+  not zero rows. So every <code>if not rows</code> check is blind to it, and the model reads
+  that row as the number zero. Measured, before this was handled:
+  <em>“The sum of all transactions regarding the account number 30123456789012 is Rs 0.”</em>
+  Verified, high confidence, green badge — and false. Zero means “these netted to nothing”;
+  the truth was “no such transactions”. The pipeline now collapses that row and says the
+  filters matched nothing, which is not the same as a total of zero.
+</p>
 
 <h2><span class="n">04</span>Data model</h2>
 
 <figure>
-<svg viewBox="0 0 820 400" role="img"
-     aria-label="Star schema: a central transactions fact table joined to vendors, departments, chart of accounts and funds dimension tables, with a one-to-one reconciliation table and a vendor payouts rollup.">
+<svg viewBox="0 0 820 430" role="img"
+     aria-label="The organizers' schema: a bank table referenced by an account table, referenced in turn by the transaction fact table. All three feed a denormalising view called v_txn, which joins them, splits the unsigned amount into credit, debit and signed columns, and serves masked forms of the two sensitive fields. Only the view is exposed to the SQL compiler.">
   <defs>
     <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5"
             markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse">
@@ -319,71 +337,89 @@
   </defs>
   <g font-family="system-ui, sans-serif" fill="currentColor">
 
-    <!-- fact -->
-    <rect x="300" y="158" width="220" height="72" rx="9" fill="var(--accent-soft)"
+    <!-- bank -->
+    <rect x="24" y="46" width="196" height="74" rx="9" fill="none"
+          stroke="currentColor" stroke-width="1.2"/>
+    <text x="122" y="70" font-size="13" text-anchor="middle" font-weight="640">bank</text>
+    <text x="122" y="89" font-size="10.5" text-anchor="middle" opacity="0.65">bank_code · bank_name</text>
+    <text x="122" y="106" font-size="10.5" text-anchor="middle" opacity="0.5">10 rows</text>
+
+    <!-- account -->
+    <rect x="298" y="46" width="204" height="100" rx="9" fill="none"
+          stroke="currentColor" stroke-width="1.2"/>
+    <text x="400" y="70" font-size="13" text-anchor="middle" font-weight="640">account</text>
+    <text x="400" y="89" font-size="10.5" text-anchor="middle" opacity="0.65">account_id · entity_id</text>
+    <text x="400" y="105" font-size="10.5" text-anchor="middle" opacity="0.65">program_id · balance</text>
+    <text x="400" y="122" font-size="10.5" text-anchor="middle" fill="var(--warn)">account_number 🔒</text>
+    <text x="400" y="138" font-size="10.5" text-anchor="middle" opacity="0.5">10 rows</text>
+
+    <!-- transaction -->
+    <rect x="580" y="46" width="212" height="134" rx="9" fill="var(--accent-soft)"
+          stroke="var(--accent)" stroke-width="1.7"/>
+    <text x="686" y="70" font-size="13" text-anchor="middle" font-weight="660"
+          fill="var(--accent-ink)">transaction</text>
+    <text x="686" y="89" font-size="10.5" text-anchor="middle" fill="var(--accent-ink)" opacity="0.8">date · type · amount</text>
+    <text x="686" y="105" font-size="10.5" text-anchor="middle" fill="var(--accent-ink)" opacity="0.8">description · reference</text>
+    <text x="686" y="122" font-size="10.5" text-anchor="middle" fill="var(--warn)">utr_number 🔒</text>
+    <text x="686" y="139" font-size="10.5" text-anchor="middle" fill="var(--accent-ink)" font-weight="600">counterparty ✦</text>
+    <text x="686" y="157" font-size="10" text-anchor="middle" fill="var(--accent-ink)" opacity="0.6">derived, not shipped</text>
+    <text x="686" y="172" font-size="10.5" text-anchor="middle" fill="var(--accent-ink)" opacity="0.55">10 rows · 9 counterparties</text>
+
+    <!-- fk edges -->
+    <line x1="298" y1="83" x2="222" y2="83" stroke="currentColor" stroke-width="1.2" marker-end="url(#ar2)"/>
+    <text x="260" y="76" font-size="9.5" text-anchor="middle" opacity="0.6">bank_code</text>
+    <line x1="580" y1="96" x2="504" y2="96" stroke="currentColor" stroke-width="1.2" marker-end="url(#ar2)"/>
+    <text x="542" y="89" font-size="9.5" text-anchor="middle" opacity="0.6">account_id</text>
+
+    <!-- feeds into the view -->
+    <path d="M 122 122 V 232" fill="none" stroke="currentColor" stroke-width="1.1"
+          stroke-dasharray="4 3" opacity="0.55" marker-end="url(#ar2)"/>
+    <path d="M 400 148 V 232" fill="none" stroke="currentColor" stroke-width="1.1"
+          stroke-dasharray="4 3" opacity="0.55" marker-end="url(#ar2)"/>
+    <path d="M 686 182 V 232" fill="none" stroke="currentColor" stroke-width="1.1"
+          stroke-dasharray="4 3" opacity="0.55" marker-end="url(#ar2)"/>
+
+    <!-- v_txn -->
+    <rect x="24" y="236" width="768" height="112" rx="10" fill="none"
           stroke="var(--accent)" stroke-width="1.8"/>
-    <text x="410" y="184" font-size="13.5" text-anchor="middle" font-weight="660"
-          fill="var(--accent-ink)">transactions</text>
-    <text x="410" y="202" font-size="11" text-anchor="middle" fill="var(--accent-ink)" opacity="0.85">1,019,354 rows</text>
-    <text x="410" y="218" font-size="10" text-anchor="middle" fill="var(--accent-ink)" opacity="0.7">money in NUMERIC(18,2)</text>
+    <text x="408" y="261" font-size="13.5" text-anchor="middle" font-weight="660"
+          fill="var(--accent-ink)">v_txn — the only surface the SQL compiler may touch</text>
+    <text x="408" y="283" font-size="11" text-anchor="middle" opacity="0.75">
+      joins all three · denormalises bank_name and account onto every row
+    </text>
+    <text x="408" y="303" font-size="11" text-anchor="middle" opacity="0.75">
+      splits the unsigned amount → credit_amount · debit_amount · signed_amount
+    </text>
+    <text x="408" y="323" font-size="11" text-anchor="middle" fill="var(--warn)">
+      serves masked forms only — XXXXXX3445, UTR-1CRl — so a raw value cannot reach an answer
+    </text>
+    <text x="408" y="340" font-size="10" text-anchor="middle" opacity="0.55">
+      companions: v_account · v_data_coverage · v_health · v_incidents · v_model_scorecard
+    </text>
 
-    <!-- dimensions -->
-    <rect x="36" y="60" width="186" height="46" rx="8" fill="none" stroke="currentColor" stroke-width="1.1"/>
-    <text x="129" y="80" font-size="12" text-anchor="middle" font-weight="600">departments</text>
-    <text x="129" y="96" font-size="10" text-anchor="middle" opacity="0.6">58</text>
-
-    <rect x="36" y="170" width="186" height="46" rx="8" fill="none" stroke="currentColor" stroke-width="1.1"/>
-    <text x="129" y="190" font-size="12" text-anchor="middle" font-weight="600">vendors</text>
-    <text x="129" y="206" font-size="10" text-anchor="middle" opacity="0.6">7,905</text>
-
-    <rect x="598" y="60" width="186" height="46" rx="8" fill="none" stroke="currentColor" stroke-width="1.1"/>
-    <text x="691" y="80" font-size="12" text-anchor="middle" font-weight="600">chart_of_accounts</text>
-    <text x="691" y="96" font-size="10" text-anchor="middle" opacity="0.6">616 · 3-level hierarchy</text>
-
-    <rect x="598" y="170" width="186" height="46" rx="8" fill="none" stroke="currentColor" stroke-width="1.1"/>
-    <text x="691" y="190" font-size="12" text-anchor="middle" font-weight="600">funds</text>
-    <text x="691" y="206" font-size="10" text-anchor="middle" opacity="0.6">338</text>
-
-    <rect x="598" y="292" width="186" height="52" rx="8" fill="none" stroke="currentColor" stroke-width="1.4"/>
-    <text x="691" y="313" font-size="12" text-anchor="middle" font-weight="600">reconciliation</text>
-    <text x="691" y="330" font-size="10" text-anchor="middle" opacity="0.6">1,019,354 · synthetic layer</text>
-
-    <rect x="36" y="292" width="186" height="52" rx="8" fill="none" stroke="currentColor" stroke-width="1.1"/>
-    <text x="129" y="313" font-size="12" text-anchor="middle" font-weight="600">vendor_payouts</text>
-    <text x="129" y="330" font-size="10" text-anchor="middle" opacity="0.6">194,248 · vendor × date</text>
-
-    <!-- edges -->
-    <line x1="222" y1="83"  x2="330" y2="158" stroke="currentColor" stroke-width="1.1" opacity="0.55" marker-end="url(#ar2)"/>
-    <line x1="222" y1="193" x2="298" y2="193" stroke="currentColor" stroke-width="1.1" opacity="0.55" marker-end="url(#ar2)"/>
-    <line x1="598" y1="83"  x2="490" y2="158" stroke="currentColor" stroke-width="1.1" opacity="0.55" marker-end="url(#ar2)"/>
-    <line x1="598" y1="193" x2="522" y2="193" stroke="currentColor" stroke-width="1.1" opacity="0.55" marker-end="url(#ar2)"/>
-    <line x1="598" y1="312" x2="492" y2="232" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar2)"/>
-    <line x1="222" y1="312" x2="328" y2="232" stroke="currentColor" stroke-width="1.1" opacity="0.55" marker-end="url(#ar2)"/>
-
-    <text x="640" y="270" font-size="10" text-anchor="middle" font-weight="600">1 : 1</text>
-    <text x="250" y="150" font-size="9.5" opacity="0.6">vendor_id</text>
-    <text x="556" y="150" font-size="9.5" opacity="0.6">account_code</text>
-
-    <text x="410" y="376" font-size="10.5" text-anchor="middle" opacity="0.6">
-      6 foreign keys, all enforced — the load would have failed otherwise
+    <text x="408" y="374" font-size="10.5" text-anchor="middle" opacity="0.6">
+      🔒 sensitive per the brief — never selected, never shown in full, never sent to the model
+    </text>
+    <text x="408" y="392" font-size="10.5" text-anchor="middle" opacity="0.6">
+      ✦ derived from free-text description at boot — without it, “who did we pay?” has no answer
     </text>
   </g>
 </svg>
 <figcaption>
-  A star schema with one deliberate compromise: <code>transactions</code> also stores
-  vendor, department and account <em>names</em> inline. It costs ~73&nbsp;MB and means a
-  small model writes correct SQL far more often.
+  Three tables, two foreign keys, and one view doing the work. <code>transaction_amount</code>
+  is <strong>always positive</strong> — direction lives in <code>transaction_type</code> — so
+  the view pre-splits it and the compiler keeps using plain <code>SUM()</code> rather than
+  learning conditional aggregation.
 </figcaption>
 </figure>
 
-<h2><span class="n">05</span>Stack and numbers</h2>
+<p>
+  The row counts are the organizers' sample export. Nothing in the system hardcodes them:
+  coverage, vocabularies and the money columns are introspected into one registry at boot,
+  so swapping in the full export is a load, not a code change.
+</p>
 
-<div class="cards">
-  <div class="card"><div class="big">2</div><div class="lbl">model calls per question</div></div>
-  <div class="card"><div class="big">0</div><div class="lbl">model calls for ambiguity handling</div></div>
-  <div class="card"><div class="big">1,019,354</div><div class="lbl">transactions, 24 months</div></div>
-  <div class="card"><div class="big">18 ms</div><div class="lbl">indexed month query</div></div>
-</div>
+<h2><span class="n">05</span>Stack</h2>
 
 <div class="tbl-wrap">
 <table>
@@ -391,28 +427,59 @@
   <tbody>
     <tr><td>Frontend</td><td>Next.js 15, App Router</td><td>Types generated from the backend schema, so the contract cannot drift</td></tr>
     <tr><td>Transport</td><td>SSE, browser → FastAPI direct</td><td>No Next proxy — proxying SSE is a known buffering trap</td></tr>
-    <tr><td>Backend</td><td>FastAPI + psycopg3 async</td><td>psycopg maps <code>NUMERIC</code> → <code>Decimal</code> natively</td></tr>
-    <tr><td>Database</td><td>PostgreSQL 18 + pg_trgm + pgvector</td><td>Exact decimal money; trigram and semantic entity matching</td></tr>
-    <tr><td>Model</td><td>Qwen2.5-7B via Ollama</td><td>Local, free to iterate, schema-constrained decoding</td></tr>
-    <tr><td>Fallback</td><td><code>claude-haiku-4-5</code></td><td>Same interface — a config flip, decided by the bake-off</td></tr>
+    <tr><td>Backend</td><td>FastAPI + aiomysql</td><td>Async pool; pyformat parameters, so no call site changed in the port</td></tr>
+    <tr><td>Database</td><td>MySQL 8.4 (Docker)</td><td>The organizers' own dialect. <code>DECIMAL(15,2)</code> is exact decimal money</td></tr>
+    <tr><td>Model</td><td><code>qwen2.5:7b-instruct</code> via Ollama</td><td>7.6&nbsp;B — well inside the 20&nbsp;B ceiling. Local, free to iterate, schema-constrained decoding</td></tr>
+    <tr><td>Embeddings</td><td><code>nomic-embed-text</code> (137&nbsp;M)</td><td>Semantic entity resolution, off by default</td></tr>
+    <tr><td>Fallback</td><td><code>claude-haiku-4-5</code></td><td>Same interface — a two-line <code>.env</code> change</td></tr>
+    <tr><td>Sensitive fields</td><td>AES-256-SIV (RFC 5297)</td><td>Deterministic, so the column stays searchable and the ciphertext doubles as a stable pseudonym</td></tr>
   </tbody>
 </table>
 </div>
 
-<h2><span class="n">06</span>What to say if asked “why will this survive the real dataset?”</h2>
+<h2><span class="n">06</span>Meeting the constraints</h2>
+
+<div class="tbl-wrap">
+<table>
+  <thead><tr><th>Constraint</th><th>How it is met</th></tr></thead>
+  <tbody>
+    <tr><td><strong>≤ 20 B parameter LLM</strong></td>
+        <td><code>qwen2.5:7b-instruct</code> — <strong>7.6 B</strong>, Q4_K_M, 4.7 GB. Runs on a laptop, no API credits spent</td></tr>
+    <tr><td><strong>≤ 20 M records</strong></td>
+        <td>Indexed for it: <code>idx_txn_date</code>, <code>idx_txn_account</code>, <code>idx_txn_counterparty</code>, FULLTEXT on description and counterparty. Two things to revisit at that scale are named in the README's limits</td></tr>
+    <tr><td><strong>Grounded in the provided schema only</strong></td>
+        <td>Structural, not promised — the compiler emits only columns the profile declares, and the verifier rejects any figure absent from the result rows</td></tr>
+    <tr><td><strong>Single company, single currency</strong></td>
+        <td>INR throughout: ₹ with Indian digit grouping (₹1,69,299.00, not ₹169,299.00), timestamps stored UTC and displayed IST</td></tr>
+    <tr><td><strong>No fabricated figures</strong></td>
+        <td>The verifier enforces it per answer; the rate is a monitored signal on <code>/ops</code> — currently <strong>97.4 %</strong> against a ≥ 95 % threshold</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2><span class="n">07</span>Why this survives the real dataset</h2>
 <ul>
-  <li><strong>Nothing hardcodes the data.</strong> Statuses, categories, the fiscal-year
-      boundary and money columns are all introspected at boot into one registry.</li>
-  <li><strong>Detectors disarm themselves.</strong> If the new data has no fiscal-year
-      column, that detector switches off. Two reconciliation statuses instead of four and
-      the scope question stops being asked — no code change either way.</li>
-  <li><strong>The swap is one loader.</strong> Emit the same seven tables and everything
-      downstream is untouched. Budgeted at 2.5 hours.</li>
+  <li><strong>Nothing hardcodes the data.</strong> Statuses, vocabularies, the date coverage
+      and the money columns are all introspected at boot into one registry
+      (<code>api/registry.py</code>). No module anywhere else may name a value in the data.</li>
+  <li><strong>Detectors disarm themselves.</strong> They arm from what the schema actually
+      holds, so on a schema without fiscal years or reconciliation statuses the matching
+      questions simply stop being asked — no code change either way. That is the profile
+      abstraction working, not dead code.</li>
+  <li><strong>The domain lives in one file.</strong> <code>api/profiles/bank_txn.py</code>
+      carries every dimension, metric, filter, prompt rule and absent-concept guard. A new
+      schema is a new profile, not a new pipeline.</li>
+  <li><strong>Migrations are idempotent.</strong> Every file is
+      <code>CREATE … IF NOT EXISTS</code> / <code>INSERT IGNORE</code>, applied on every boot,
+      because a migration that runs at every start must never drop anything.</li>
+  <li><strong>The canary recomputes its ground truth.</strong> Expected values are queries, not
+      literals, so the 46-question set stays valid the moment the real export lands.</li>
 </ul>
 
 <p class="lede" style="margin-top:26px; padding-top:16px; border-top:1px solid var(--line); font-size:13.5px;">
-  Companion documents: <code>PLAN.md</code> (strategy) · <code>FLOW.md</code> (interfaces)
-  · <code>AMBIGUITY.md</code> (clarification design) · <code>data/DATA_DICTIONARY.md</code> (schema).
+  Companion documents: <code>README.md</code> (setup, samples, model choice) ·
+  <code>PLAN.md</code> (strategy) · <code>FLOW.md</code> (interfaces) ·
+  <code>AMBIGUITY.md</code> (clarification design) · <code>MYSQL_PORT.md</code> (the port).
 </p>
 
 </div>

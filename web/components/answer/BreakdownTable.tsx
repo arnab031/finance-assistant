@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import type { RowsPayload } from "../chat/Chat";
-import { columnLabel, formatCell, isMoneyColumn, isRightAligned } from "@/lib/format";
+import { columnLabel, countLabel, formatCell, isMoneyColumn, isRightAligned } from "@/lib/format";
 import { downloadCsv, toCsv } from "@/lib/toCsv";
 
 /**
@@ -34,7 +34,7 @@ export default function BreakdownTable({ rows }: { rows: RowsPayload }) {
     <div className="table-block">
       <div className="table-meta">
         <span>
-          {rows.row_count.toLocaleString()} {rows.row_count === 1 ? "row" : "rows"}
+          {countLabel(rows.row_count, "row")}
           {rows.truncated && <em> · showing first {rows.rows.length}</em>}
           <span className="table-timing"> · {rows.elapsed_ms} ms</span>
         </span>

@@ -1,14 +1,24 @@
 /**
- * Backend client. Talks to FastAPI directly - no Next.js proxy.
+ * Backend client.
  *
- * Proxying SSE through a route handler is a well-known source of buffering
- * bugs; keeping the browser on a direct connection removes the category.
+ * The browser uses a relative base so /api/* rides the rewrite in
+ * next.config.mjs - one origin, so a single tunnel covers both and there is no
+ * CORS. SSE survives that hop because `compress: false` is set there; gzip
+ * pooling the frames is the buffering bug to watch for.
  */
 
 import type { AskRequest, ClarifyRequest, Coverage, Event } from "./types";
 
+// `||`, not `??`: NEXT_PUBLIC_API_URL is set-but-empty in web/.env.local to
+// select the relative/proxied path, and `??` would keep that "" as the base.
+// Server components then built relative URLs, which Node's fetch cannot parse -
+// getCoverage/getSuggestions swallowed the TypeError and the page rendered
+// "Backend unreachable" against a perfectly healthy API. Only the server needs
+// an absolute origin; 127.0.0.1 because uvicorn binds IPv4 while Node can
+// resolve localhost to ::1.
 export const API =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+  process.env.NEXT_PUBLIC_API_URL ||
+  (typeof window === "undefined" ? "http://127.0.0.1:8000" : "");
 
 export class ApiError extends Error {
   constructor(readonly status: number, message: string) {
@@ -71,6 +81,30 @@ export function askStream(body: AskRequest, signal?: AbortSignal) {
 
 export function clarifyStream(body: ClarifyRequest, signal?: AbortSignal) {
   return streamSSE("/api/clarify", body, signal);
+}
+
+export type Suggestions = {
+  dataset: string; label: string; placeholder: string; suggestions: string[];
+};
+
+/** Models the chat may be answered by. Same endpoint /ops uses to pick a
+ *  canary target - one declared list (EVAL_MODELS), so the two screens can
+ *  never offer different models. */
+export async function getModels(): Promise<
+  { models: string[]; default: string } | null
+> {
+  try {
+    const r = await fetch(`${API}/api/models`, { cache: "no-store" });
+    return r.ok ? await r.json() : null;
+  } catch { return null; }
+}
+
+/** Starter chips come from the backend so they always match the loaded schema. */
+export async function getSuggestions(): Promise<Suggestions | null> {
+  try {
+    const r = await fetch(`${API}/api/suggestions`, { cache: "no-store" });
+    return r.ok ? ((await r.json()) as Suggestions) : null;
+  } catch { return null; }
 }
 
 export async function getCoverage(): Promise<Coverage | null> {

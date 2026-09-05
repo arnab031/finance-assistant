@@ -9,9 +9,9 @@
  * silent no-op.
  */
 
-import { useCallback, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import type { Coverage, Event } from "@/lib/types";
-import { askStream, clarifyStream } from "@/lib/api";
+import { askStream, clarifyStream, getModels } from "@/lib/api";
 import MessageList from "./MessageList";
 import Composer from "./Composer";
 
@@ -35,6 +35,7 @@ export type Assistant = {
   clarify?: ClarifyPayload;
   clarifiedWith?: string;
   confidence?: "high" | "medium" | "low";
+  timing?: { total: number; extract: number; sql: number; narrate: number };
   error?: string;
   done: boolean;
 };
@@ -74,6 +75,10 @@ function reduce(state: Message[], action: Action): Message[] {
         if (m.id !== action.id || m.role !== "assistant") return m;
         const e = action.event;
         switch (e.type) {
+          case "thread":
+            // Server-issued thread id. Adopted by Chat so follow-ups and settled
+            // ambiguity choices stay attached to this conversation.
+            return m;
           case "stage":
             return { ...m, stage: e.stage as Stage };
           case "spec":
@@ -91,7 +96,18 @@ function reduce(state: Message[], action: Action): Message[] {
           case "clarify":
             return { ...m, clarify: e };
           case "done":
-            return { ...m, confidence: e.confidence, done: true, stage: undefined };
+            return {
+              ...m,
+              confidence: e.confidence,
+              done: true,
+              stage: undefined,
+              timing: {
+                total: e.total_ms ?? 0,
+                extract: e.extract_ms ?? 0,
+                sql: e.sql_ms ?? 0,
+                narrate: e.narrate_ms ?? 0,
+              },
+            };
           case "error":
             return { ...m, error: e.message, done: true };
           default: {
@@ -110,14 +126,29 @@ const nextId = () => `m${++counter}`;
 export default function Chat({
   coverage,
   suggestions,
+  placeholder,
 }: {
   coverage: Coverage | null;
   suggestions: string[];
+  placeholder?: string;
 }) {
   const [messages, dispatch] = useReducer(reduce, []);
   const [busy, setBusy] = useState(false);
   const threadId = useRef(`t_${Math.random().toString(36).slice(2, 10)}`);
   const abort = useRef<AbortController | null>(null);
+  // Which model answers. Sent per question rather than set as a server-wide
+  // default, so switching mid-thread changes the next answer and nothing else.
+  const [models, setModels] = useState<string[]>([]);
+  const [model, setModel] = useState("");
+
+  useEffect(() => {
+    void (async () => {
+      const m = await getModels();
+      if (!m) return;
+      setModels(m.models);
+      setModel(m.default);
+    })();
+  }, []);
 
   const consume = useCallback(
     async (id: string, stream: AsyncGenerator<Event>) => {
@@ -149,10 +180,13 @@ export default function Chat({
       abort.current = new AbortController();
       void consume(
         answerId,
-        askStream({ question: text, thread_id: threadId.current }, abort.current.signal),
+        askStream(
+          { question: text, thread_id: threadId.current, model: model || undefined },
+          abort.current.signal,
+        ),
       );
     },
-    [busy, consume],
+    [busy, consume, model],
   );
 
   const choose = useCallback(
@@ -164,12 +198,18 @@ export default function Chat({
       void consume(
         messageId,
         clarifyStream(
-          { thread_id: threadId.current, ambiguity_id: ambiguityId, chosen_key: key },
+          {
+            thread_id: threadId.current,
+            ambiguity_id: ambiguityId,
+            chosen_key: key,
+            // Resolve on the model that raised the ambiguity.
+            model: model || undefined,
+          },
           abort.current.signal,
         ),
       );
     },
-    [busy, consume],
+    [busy, consume, model],
   );
 
   const stop = useCallback(() => {
@@ -186,7 +226,9 @@ export default function Chat({
         onChoose={choose}
         onSuggest={send}
       />
-      <Composer onSend={send} onStop={stop} busy={busy} />
+      <Composer onSend={send} onStop={stop} busy={busy}
+                placeholder={placeholder}
+                models={models} model={model} onModel={setModel} />
     </div>
   );
 }

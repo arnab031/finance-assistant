@@ -27,6 +27,7 @@ node_modules/
 out/
 .turbo/
 next-env.d.ts
+*.tsbuildinfo
 npm-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
@@ -89,3 +90,6 @@ Icon?
 *.swp
 *~
 .ipynb_checkpoints/
+
+# next local overrides
+.env*.local

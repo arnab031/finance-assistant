@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 import type { SqlPayload } from "../chat/Chat";
+import { countLabel } from "@/lib/format";
+import { seconds } from "./AnswerCard";
 
 /**
  * "Show what data it pulled and how it arrived at an answer" - the
@@ -12,12 +14,13 @@ import type { SqlPayload } from "../chat/Chat";
  * together trace the whole path from question to number.
  */
 export default function ProvenancePanel({
-  spec, sql, rowCount, elapsedMs,
+  spec, sql, rowCount, elapsedMs, timing,
 }: {
   spec?: unknown;
   sql?: SqlPayload;
   rowCount?: number;
   elapsedMs?: number;
+  timing?: { total: number; extract: number; sql: number; narrate: number };
 }) {
   const [open, setOpen] = useState(false);
   if (!spec && !sql) return null;
@@ -29,12 +32,29 @@ export default function ProvenancePanel({
         How I got this
         {rowCount !== undefined && (
           <span className="prov-summary">
-            {rowCount.toLocaleString()} rows{elapsedMs !== undefined ? ` · ${elapsedMs} ms` : ""}
+            {countLabel(rowCount, "row")}
+            {elapsedMs !== undefined ? ` · ${elapsedMs} ms` : ""}
           </span>
         )}
       </button>
       {open && (
         <div className="prov-body">
+          {timing && timing.total > 0 && (
+            <section>
+              <h4>Where the time went</h4>
+              {/* Worth its own section rather than a footnote. The database step
+                  is routinely single-digit milliseconds while the whole answer
+                  takes seconds - so the honest reading of a slow answer is
+                  "the model was thinking", not "the query was slow". Without
+                  this, the only timing on screen is the 9 ms one. */}
+              <ul className="prov-timing">
+                <li><span>Understanding the question</span><b>{seconds(timing.extract)}</b></li>
+                <li><span>Querying the ledger</span><b>{seconds(timing.sql)}</b></li>
+                <li><span>Writing and verifying the answer</span><b>{seconds(timing.narrate)}</b></li>
+                <li className="prov-timing-total"><span>Total</span><b>{seconds(timing.total)}</b></li>
+              </ul>
+            </section>
+          )}
           {spec ? (
             <section>
               <h4>1 · What the model produced</h4>

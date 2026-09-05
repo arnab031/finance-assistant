@@ -1,4 +1,4 @@
-# Data Dictionary
+# Finsight — Data Dictionary
 
 Stand-in dataset for **TBX — BVP Tech Catalyst Hackathon**, "Build a Finance Assistant That
 Actually Understands You".

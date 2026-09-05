@@ -1,6 +1,6 @@
-# PRD — Grounded Finance Assistant
+# PRD — Finsight
 
-TBX / BVP Tech Catalyst. **Solo build, today.** Hackathon tomorrow.
+Team **Finsight** · TBX / BVP Tech Catalyst. **Solo build, today.** Hackathon tomorrow.
 
 Companions: [PLAN.md](PLAN.md) (strategy) · [FLOW.md](FLOW.md) (architecture) · [AMBIGUITY.md](AMBIGUITY.md) (clarification design) · [data/DATA_DICTIONARY.md](data/DATA_DICTIONARY.md) (schema)
 

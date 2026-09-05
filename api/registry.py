@@ -42,6 +42,7 @@ class SemanticRegistry:
     programs: list[str] = field(default_factory=list)
     payment_statuses: list[str] = field(default_factory=list)
     recon_statuses: list[str] = field(default_factory=list)
+    banks: list[str] = field(default_factory=list)
     fiscal_years: list[str] = field(default_factory=list)
 
     # ---- capability flags: which detectors and dimensions may arm ----
@@ -57,6 +58,8 @@ class SemanticRegistry:
     # SF is 7 (July). A dataset on an Apr-Mar or Jan-Dec year yields 4 or 1 and
     # the temporal detector adapts with no code change.
     fiscal_year_start_month: int | None = None
+    profile_name: str = "bank_txn"
+    entity_kind: str = "vendor"
 
     def fiscal_year_window(self, fy: str) -> tuple[date, date] | None:
         """The [start, end) calendar window a fiscal-year label corresponds to.
@@ -82,71 +85,73 @@ class SemanticRegistry:
 
     @classmethod
     async def build(cls, db: Database) -> "SemanticRegistry":
-        cov = await db.fetchone(
-            """SELECT MIN(transaction_date) AS earliest,
-                      MAX(transaction_date) AS latest,
-                      COUNT(*)              AS n,
-                      COALESCE(SUM(amount_paid), 0) AS paid
-               FROM transactions"""
-        )
+        """Learn the dataset by asking it, using the active profile's queries.
+
+        Nothing here names a table or column directly - every query comes from
+        api/profiles/. That is what lets the same registry serve a 7-table
+        vendor ledger and a 3-table bank statement schema.
+        """
+        from api.profiles.base import get_profile
+
+        prof = get_profile()
+
+        cov = await db.fetchone(prof.coverage_sql)
         if not cov or cov["n"] == 0:
-            raise RuntimeError("transactions table is empty - load data first")
+            raise RuntimeError(f"{prof.label}: fact table is empty - load data first")
 
-        has_fy = await db.has_column("transactions", "fiscal_year")
-        has_recon = await db.has_table("reconciliation")
-        has_payouts = await db.has_table("vendor_payouts")
+        async def capability(name: str, fallback):
+            """Capability flags decide which ambiguity detectors arm. A dataset
+            without fiscal years, reconciliation or payouts silently disarms
+            those detectors - no code change, which is the whole point."""
+            sql = prof.capability_sql.get(name)
+            if sql:
+                return bool(await db.scalar(sql))
+            return await fallback()
 
-        money = [c for c in await db.numeric_columns("transactions")
-                 if c.startswith("amount_")]
+        has_fy = await capability(
+            "has_fiscal_year", lambda: db.has_column("transactions", "fiscal_year"))
+        has_recon = await capability(
+            "has_reconciliation", lambda: db.has_table("reconciliation"))
+        has_payouts = await capability(
+            "has_payouts", lambda: db.has_table("vendor_payouts"))
 
-        recon_statuses: list[str] = []
-        if has_recon:
-            recon_statuses = await db.column(
-                "SELECT DISTINCT reconciliation_status FROM reconciliation "
-                "WHERE reconciliation_status IS NOT NULL ORDER BY 1"
-            )
+        async def vocab(key: str) -> list[str]:
+            sql = prof.vocab_sql.get(key)
+            return await db.column(sql) if sql else []
+
+        recon_statuses = await vocab("recon_statuses") if has_recon else []
+        money = [c for c in await db.numeric_columns(prof.money_columns_table)
+                 if c.startswith("amount_") or c.endswith("_amount")]
 
         reg = cls(
             earliest=cov["earliest"],
             latest=cov["latest"],
             transaction_count=cov["n"],
             total_paid=cov["paid"],
-            categories=await db.column(
-                "SELECT DISTINCT category_name FROM transactions "
-                "WHERE category_name IS NOT NULL ORDER BY 1"),
-            departments=await db.column(
-                "SELECT DISTINCT department_name FROM transactions "
-                "WHERE department_name IS NOT NULL ORDER BY 1"),
-            funds=await db.column(
-                "SELECT DISTINCT fund_name FROM transactions "
-                "WHERE fund_name IS NOT NULL ORDER BY 1"),
-            fund_types=await db.column(
-                "SELECT DISTINCT fund_type_name FROM funds "
-                "WHERE fund_type_name IS NOT NULL ORDER BY 1"),
-            programs=await db.column(
-                "SELECT DISTINCT program_name FROM transactions "
-                "WHERE program_name IS NOT NULL ORDER BY 1"),
-            payment_statuses=await db.column(
-                "SELECT DISTINCT payment_status FROM transactions "
-                "WHERE payment_status IS NOT NULL ORDER BY 1"),
+            categories=await vocab("categories"),
+            departments=await vocab("departments"),
+            funds=await vocab("funds"),
+            fund_types=await vocab("fund_types"),
+            programs=await vocab("programs"),
+            payment_statuses=await vocab("payment_statuses"),
             recon_statuses=recon_statuses,
-            fiscal_years=(await db.column(
-                "SELECT DISTINCT fiscal_year FROM transactions "
-                "WHERE fiscal_year IS NOT NULL ORDER BY 1") if has_fy else []),
+            banks=await vocab("banks"),
+            fiscal_years=await vocab("fiscal_years") if has_fy else [],
             has_fiscal_year=has_fy,
             has_reconciliation=has_recon,
             has_payouts=has_payouts,
             money_columns=money,
             reconciled_label=_detect_reconciled(recon_statuses),
-            vendor_count=await db.scalar("SELECT COUNT(*) FROM vendors") or 0,
+            vendor_count=(await db.scalar(prof.entity_count_sql)
+                          if prof.entity_count_sql else 0) or 0,
             fiscal_year_start_month=(await _detect_fy_start(db)) if has_fy else None,
+            profile_name=prof.name,
+            entity_kind=prof.entity_kind,
         )
         log.info(
-            "registry: %s..%s  %s txns  %s vendors  %s categories  %s recon statuses "
-            "(matched=%r)  fiscal_year=%s",
-            reg.earliest, reg.latest, f"{reg.transaction_count:,}",
-            f"{reg.vendor_count:,}", len(reg.categories), len(reg.recon_statuses),
-            reg.reconciled_label, reg.has_fiscal_year,
+            "registry[%s]: %s..%s  %s rows  %s %ss  fiscal_year=%s recon=%s",
+            prof.name, reg.earliest, reg.latest, f"{reg.transaction_count:,}",
+            f"{reg.vendor_count:,}", reg.entity_kind, has_fy, has_recon,
         )
         return reg
 
@@ -185,6 +190,7 @@ class SemanticRegistry:
 
     def vocabulary(self, kind: str) -> list[str]:
         return {
+            "bank": self.banks,
             "category": self.categories,
             "department": self.departments,
             "fund": self.funds,
@@ -204,9 +210,15 @@ class SemanticRegistry:
         lines = [
             f"Data coverage: {self.earliest} to {self.latest} "
             f"({self.transaction_count:,} transactions).",
-            f"Categories: {cap(self.categories)}",
-            f"Payment statuses: {cap(self.payment_statuses)}",
         ]
+        if self.categories:
+            lines.append(f"Categories: {cap(self.categories)}")
+        if self.banks:
+            lines.append(f"Banks: {cap(self.banks)}")
+        if self.payment_statuses:
+            label = ("Transaction types" if self.profile_name == "bank_txn"
+                     else "Payment statuses")
+            lines.append(f"{label}: {cap(self.payment_statuses)}")
         if self.has_reconciliation:
             lines.append(f"Reconciliation statuses: {cap(self.recon_statuses)}")
         if self.has_fiscal_year and self.fiscal_years:
@@ -214,7 +226,11 @@ class SemanticRegistry:
                 f"Fiscal years present: {self.fiscal_years[0]}-{self.fiscal_years[-1]} "
                 f"(a fiscal year is the budget year charged, not a date range)"
             )
-        lines.append(f"Departments ({len(self.departments)}): {cap(self.departments, 25)}")
+        if self.departments:
+            lines.append(
+                f"Departments ({len(self.departments)}): {cap(self.departments, 25)}")
+        if self.programs:
+            lines.append(f"Programs: {cap(self.programs, 20)}")
         return "\n".join(lines)
 
 
@@ -234,22 +250,29 @@ async def _detect_fy_start(db: Database) -> int | None:
     rows = await db.fetch(
         """
         WITH per_month AS (
-            SELECT date_trunc('month', transaction_date) AS mon_start,
+            -- date_trunc has no MySQL equivalent; subtracting (day-of-month - 1)
+            -- days gives the same first-of-month with no literal % in the SQL.
+            SELECT (DATE(transaction_date)
+                    - INTERVAL (DAYOFMONTH(transaction_date) - 1) DAY) AS mon_start,
                    fiscal_year, COUNT(*) AS n
             FROM transactions
             WHERE fiscal_year IS NOT NULL
             GROUP BY 1, 2
         ),
+        ranked AS (                      -- DISTINCT ON has no MySQL equivalent
+            SELECT mon_start, fiscal_year,
+                   ROW_NUMBER() OVER (PARTITION BY mon_start ORDER BY n DESC) AS rn
+            FROM per_month
+        ),
         modal AS (                       -- the fiscal year owning each month
-            SELECT DISTINCT ON (mon_start) mon_start, fiscal_year
-            FROM per_month ORDER BY mon_start, n DESC
+            SELECT mon_start, fiscal_year FROM ranked WHERE rn = 1
         ),
         transitions AS (
             SELECT mon_start, fiscal_year,
                    LAG(fiscal_year) OVER (ORDER BY mon_start) AS prev_fy
             FROM modal
         )
-        SELECT EXTRACT(MONTH FROM mon_start)::int AS mon, COUNT(*) AS hits
+        SELECT CAST(MONTH(mon_start) AS SIGNED) AS mon, COUNT(*) AS hits
         FROM transitions
         WHERE prev_fy IS NOT NULL AND fiscal_year <> prev_fy
         GROUP BY 1 ORDER BY hits DESC, mon LIMIT 1

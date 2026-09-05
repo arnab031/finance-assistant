@@ -12,7 +12,7 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-PG_BIN="/opt/homebrew/opt/postgresql@18/bin"
+MYSQL_CONTAINER="tbx-mysql"
 API_LOG="/tmp/tbx_api.log"
 WEB_LOG="/tmp/tbx_web.log"
 
@@ -33,8 +33,14 @@ wait_for() {  # port, name, seconds
 
 start_services() {
   hdr "Infrastructure"
-  if listening 5432; then ok "postgres already on :5432"
-  else brew services start postgresql@18 >/dev/null 2>&1; wait_for 5432 postgres; fi
+  # MySQL runs in Docker (see MYSQL_PORT.md). The container holds its data in
+  # the tbx-mysql-data volume, so `docker start` resumes rather than rebuilds.
+  if listening 3306; then ok "mysql already on :3306"
+  else
+    docker start "$MYSQL_CONTAINER" >/dev/null 2>&1 \
+      || { no "container $MYSQL_CONTAINER missing - see MYSQL_PORT.md"; return 1; }
+    wait_for 3306 mysql 60
+  fi
 
   if listening 11434; then ok "ollama already on :11434"
   else brew services start ollama >/dev/null 2>&1; wait_for 11434 ollama; fi
@@ -56,7 +62,7 @@ start_services() {
 
 status() {
   hdr "Services"
-  for pair in "5432 postgres" "11434 ollama" "8000 api" "3000 web"; do
+  for pair in "3306 mysql" "11434 ollama" "8000 api" "3000 web"; do
     set -- $pair
     listening "$1" && ok "$2 :$1" || no "$2 :$1 not running"
   done
@@ -79,6 +85,12 @@ case "${1:-start}" in
     start_services
     echo
     hdr "Ready"
+    ./.venv/bin/python - <<'EOF' 2>/dev/null || true
+from api.config import settings
+db = settings.database_url.rsplit("/", 1)[-1]
+print(f"  dataset  {settings.dataset}  ->  {db}")
+print(f"  model    {settings.ollama_model}")
+EOF
     echo "  web    http://localhost:3000     <- open this"
     echo "  api    http://localhost:8000/api/health"
     echo "  docs   http://localhost:8000/docs"
@@ -90,7 +102,7 @@ case "${1:-start}" in
   stop)
     pkill -f "uvicorn api.main:app" 2>/dev/null && ok "api stopped" || no "api was not running"
     pkill -f "next dev" 2>/dev/null && ok "web stopped" || no "web was not running"
-    echo "  (postgres and ollama left running - brew services stop postgresql@18 ollama)"
+    echo "  (mysql and ollama left running - docker stop tbx-mysql; brew services stop ollama)"
     ;;
   test)
     listening 8000 || { no "api not running - ./run.sh start"; exit 1; }
