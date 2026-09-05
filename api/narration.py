@@ -30,6 +30,7 @@ guessing, and the caller falls back to searching the raw description.
 
 from __future__ import annotations
 
+import logging
 import re
 
 # HDFC0001241, AUBL0002125 - Indian bank branch codes.
@@ -58,6 +59,8 @@ _SPACES = re.compile(r"\s+")
 _HAS_WORD = re.compile(r"[A-Za-z]{3,}")
 
 MIN_LENGTH = 3
+
+log = logging.getLogger("tbx.narration")
 
 
 def extract_counterparty(description: str | None) -> str | None:
@@ -95,33 +98,68 @@ def counterparty_or_none(description: str | None) -> str | None:
 async def ensure_counterparty(db, batch: int = 5000) -> int:
     """Populate `transaction.counterparty` for rows that do not have it yet.
 
-    Runs at startup. It exists because counterparty is a DERIVED column: the
-    parsing rules live in this module where they are tested, not in SQL where
-    they are not, so no migration can fill it. Without this, a freshly created
-    database answers "who did we pay?" with nothing at all and looks broken
-    rather than unpopulated.
+    Runs at startup, BEFORE the server accepts traffic. counterparty is a
+    DERIVED column - the parsing rules live in this module where they are
+    tested, not in SQL where they are not - so no migration can fill it, and a
+    freshly created database would otherwise answer "who did we pay?" with
+    nothing and look broken rather than unpopulated.
 
-    Idempotent and incremental - it only touches rows where counterparty IS
-    NULL, so a normal boot does no work and the real export gets parsed on the
-    first boot after it lands. Rows whose narration yields no usable name are
-    left NULL on purpose; the caller falls back to searching the raw
-    description rather than filtering on a wrong guess.
+    Blocking boot is the deliberate choice: answering on a half-parsed table
+    would be quietly wrong, and quietly wrong is the failure this whole codebase
+    is built to avoid. The cost is kept low by the two decisions below.
+
+    KEYSET PAGINATION, NOT `LIMIT n`.
+    The first version read one LIMIT 5000 batch per boot, so a 500k-row export
+    would have needed a hundred restarts to finish. Looping on the same
+    predicate instead would never terminate: rows whose narration yields no
+    usable name stay NULL by design, so they would be re-read forever. Paging on
+    transaction_id walks past them exactly once.
+
+    ONE UPDATE PER NAME, NOT PER ROW.
+    Distinct counterparties are far fewer than transactions - 9 across the
+    sample, and on a real export thousands against hundreds of thousands of
+    rows - so grouping collapses the write count by orders of magnitude.
     """
-    rows = await db.fetch(
-        """SELECT transaction_id, description FROM `transaction`
-           WHERE counterparty IS NULL AND description IS NOT NULL
-           LIMIT %(lim)s""",
-        {"lim": batch},
-    )
     filled = 0
-    for row in rows:
-        name = extract_counterparty(row["description"])
-        if not name:
-            continue
-        await db.execute(
-            """UPDATE `transaction` SET counterparty = %(c)s
-               WHERE transaction_id = %(id)s""",
-            {"c": name, "id": row["transaction_id"]},
+    scanned = 0
+    after = ""
+
+    while True:
+        rows = await db.fetch(
+            """SELECT transaction_id, description FROM `transaction`
+               WHERE counterparty IS NULL AND description IS NOT NULL
+                 AND transaction_id > %(after)s
+               ORDER BY transaction_id
+               LIMIT %(lim)s""",
+            {"after": after, "lim": batch},
         )
-        filled += 1
+        if not rows:
+            break
+
+        after = rows[-1]["transaction_id"]
+        scanned += len(rows)
+
+        by_name: dict[str, list[str]] = {}
+        for row in rows:
+            name = extract_counterparty(row["description"])
+            if name:
+                by_name.setdefault(name, []).append(row["transaction_id"])
+
+        for name, ids in by_name.items():
+            # Chunked so one very common counterparty cannot build a statement
+            # larger than max_allowed_packet.
+            for i in range(0, len(ids), 1000):
+                chunk = ids[i:i + 1000]
+                keys = {f"id_{n}": v for n, v in enumerate(chunk)}
+                placeholders = ", ".join(f"%({k})s" for k in keys)
+                await db.execute(
+                    f"""UPDATE `transaction` SET counterparty = %(c)s
+                        WHERE transaction_id IN ({placeholders})""",
+                    {"c": name, **keys},
+                )
+            filled += len(ids)
+
+        if scanned % (batch * 10) == 0:
+            log.info("counterparty backfill: %d scanned, %d named", scanned, filled)
+
     return filled
