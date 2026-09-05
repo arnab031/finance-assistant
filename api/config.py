@@ -33,12 +33,17 @@ class Settings(BaseSettings):
     pool_max_size: int = 10
 
     # ---- language model (LLM call #1 and #2) ----
-    llm_provider: Literal["ollama", "anthropic"] = "ollama"
+    llm_provider: Literal["ollama", "anthropic", "vllm"] = "ollama"
     ollama_url: str = "http://localhost:11434"
     ollama_model: str = "qwen2.5:7b-instruct"
     ollama_keep_alive: str = "30m"          # avoids the measured ~9s cold reload
     ollama_timeout_s: int = 120
     anthropic_model: str = "claude-haiku-4-5"
+
+    # vLLM (vllm-metal/MLX, local) - OpenAI-compatible wire format on port 9000.
+    vllm_url: str = "http://localhost:9000/v1"
+    vllm_model: str = "mlx-community/gemma-3-4b-it-qat-4bit"
+    vllm_timeout_s: int = 120
 
     # ---- embeddings (semantic entity resolution, Phase 8) ----
     # nomic-embed-text over sentence-transformers: zero extra dependency, and

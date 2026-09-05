@@ -88,8 +88,11 @@ case "${1:-start}" in
     ./.venv/bin/python - <<'EOF' 2>/dev/null || true
 from api.config import settings
 db = settings.database_url.rsplit("/", 1)[-1]
+active_model = {"vllm": settings.vllm_model,
+                "anthropic": settings.anthropic_model,
+                "ollama": settings.ollama_model}[settings.llm_provider]
 print(f"  dataset  {settings.dataset}  ->  {db}")
-print(f"  model    {settings.ollama_model}")
+print(f"  model    {settings.llm_provider}/{active_model}")
 EOF
     echo "  web    http://localhost:3000     <- open this"
     echo "  api    http://localhost:8000/api/health"

@@ -239,17 +239,30 @@ async def health() -> JSONResponse:
     except Exception as exc:  # noqa: BLE001
         checks["semantic_index"] = {"ok": False, "error": str(exc)}
 
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"{settings.ollama_url}/api/tags")
-            names = [m["name"] for m in r.json().get("models", [])]
-        checks["ollama"] = {
-            "ok": settings.ollama_model in names,
-            "models": names,
-            "want": settings.ollama_model,
-        }
-    except Exception as exc:  # noqa: BLE001
-        checks["ollama"] = {"ok": False, "error": str(exc)}
+    if settings.llm_provider == "vllm":
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                r = await client.get(f"{settings.vllm_url}/models")
+                names = [m["id"] for m in r.json().get("data", [])]
+            checks["vllm"] = {
+                "ok": settings.vllm_model in names,
+                "models": names,
+                "want": settings.vllm_model,
+            }
+        except Exception as exc:  # noqa: BLE001
+            checks["vllm"] = {"ok": False, "error": str(exc)}
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                r = await client.get(f"{settings.ollama_url}/api/tags")
+                names = [m["name"] for m in r.json().get("models", [])]
+            checks["ollama"] = {
+                "ok": settings.ollama_model in names,
+                "models": names,
+                "want": settings.ollama_model,
+            }
+        except Exception as exc:  # noqa: BLE001
+            checks["ollama"] = {"ok": False, "error": str(exc)}
 
     ok = all(isinstance(c, dict) and c.get("ok") for c in checks.values())
     return JSONResponse({"ok": ok, "checks": checks}, status_code=200 if ok else 503)

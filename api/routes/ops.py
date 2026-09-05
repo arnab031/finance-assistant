@@ -80,8 +80,9 @@ async def eval_run(request: Request) -> StreamingResponse:
                     })
                     return
 
-            model = (settings.ollama_model if settings.llm_provider == "ollama"
-                     else settings.anthropic_model)
+            model = {"ollama": settings.ollama_model,
+                      "vllm": settings.vllm_model,
+                      "anthropic": settings.anthropic_model}[settings.llm_provider]
 
             async for kind, payload in run_eval(db, "http://localhost:8000",
                                                 model, only, notes):
