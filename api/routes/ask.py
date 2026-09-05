@@ -145,6 +145,8 @@ async def _pipeline(body: AskRequest, request: Request) -> AsyncIterator[str]:
             # When the absent-concept guard fired it knows WHICH domain is
             # missing, which is more useful than the generic list.
             specific = {reason for _, reason in prof.absent_concepts}
+            from api.extract import FORCED_REASONS
+            specific |= FORCED_REASONS
             text = (spec.reasoning if spec.reasoning in specific
                     else prof.unsupported_note)
             trace.note(text)
@@ -294,12 +296,31 @@ async def _clarify_pipeline(body: ClarifyRequest, request: Request) -> AsyncIter
 # --------------------------------------------------------------------------
 
 
-def _is_empty_aggregate(columns, rows) -> bool:
-    """One row whose every measure is NULL or a zero count = nothing matched.
+def _has_scope(spec) -> bool:
+    """A period or any populated filter: the question narrowed the data."""
+    if spec.period is not None or spec.fiscal_year:
+        return True
+    return any(v not in (None, [], "", False) and not isinstance(v, bool)
+               for v in spec.filters.model_dump().values())
 
-    Not `len(rows) == 0`: SUM() over an empty set yields a row, not no rows.
-    A genuine zero-valued result keeps a non-zero count, so it is not caught.
+
+def _matched_nothing(spec, columns, rows) -> bool:
+    """Nothing matched, in either shape the database uses to say so.
+
+    An UNGROUPED aggregate over nothing is one row of (NULL, 0) - SUM() yields
+    a row, not no rows. A GROUPED aggregate or a LIST over nothing is zero rows.
+    The first shape was handled; the second went silent: "How much went through
+    Canara Bank?" (a bank with no transactions) and "debits over 10 lakh" came
+    back as an empty table with no note, which reads as a broken query rather
+    than an honest none. Zero rows only count when the question narrowed the
+    data - an empty unfiltered result would mean an empty database, which is
+    a different message.
     """
+    if spec.intent == "anomaly":
+        # Zero anomalies is the ordinary outcome, not a failed match.
+        return False
+    if not rows:
+        return _has_scope(spec)
     if len(rows) != 1:
         return False
     row = dict(zip(columns, rows[0]))
@@ -333,7 +354,7 @@ async def _execute(spec, reg, trace: RequestTrace, llm, question: str) -> AsyncI
     # message and an account-number oracle: this endpoint is unauthenticated,
     # so a nicer error would let anyone walk the number space and learn which
     # accounts are real.
-    if _is_empty_aggregate(columns, raw_rows):
+    if _matched_nothing(spec, columns, raw_rows):
         # Collapsed to no rows, not merely annotated. Left in place the row
         # reaches the breakdown table as "— | 0" under a "1 row" caption, the
         # narrator reads a 0 it can legitimately quote, and trace.row_count = 1

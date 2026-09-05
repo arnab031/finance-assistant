@@ -1,14 +1,24 @@
 /**
- * Backend client. Talks to FastAPI directly - no Next.js proxy.
+ * Backend client.
  *
- * Proxying SSE through a route handler is a well-known source of buffering
- * bugs; keeping the browser on a direct connection removes the category.
+ * The browser uses a relative base so /api/* rides the rewrite in
+ * next.config.mjs - one origin, so a single tunnel covers both and there is no
+ * CORS. SSE survives that hop because `compress: false` is set there; gzip
+ * pooling the frames is the buffering bug to watch for.
  */
 
 import type { AskRequest, ClarifyRequest, Coverage, Event } from "./types";
 
+// `||`, not `??`: NEXT_PUBLIC_API_URL is set-but-empty in web/.env.local to
+// select the relative/proxied path, and `??` would keep that "" as the base.
+// Server components then built relative URLs, which Node's fetch cannot parse -
+// getCoverage/getSuggestions swallowed the TypeError and the page rendered
+// "Backend unreachable" against a perfectly healthy API. Only the server needs
+// an absolute origin; 127.0.0.1 because uvicorn binds IPv4 while Node can
+// resolve localhost to ::1.
 export const API =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+  process.env.NEXT_PUBLIC_API_URL ||
+  (typeof window === "undefined" ? "http://127.0.0.1:8000" : "");
 
 export class ApiError extends Error {
   constructor(readonly status: number, message: string) {

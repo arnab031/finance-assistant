@@ -90,3 +90,6 @@ Icon?
 *.swp
 *~
 .ipynb_checkpoints/
+
+# next local overrides
+.env*.local

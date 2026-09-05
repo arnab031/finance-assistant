@@ -48,7 +48,8 @@ class Settings(BaseSettings):
     # Models the /ops canary offers, in this order. Declared rather than
     # discovered: the scorecard compares MODELS, and which ones we measure is a
     # decision, not an accident of what happens to be pulled on the box. Leave
-    # empty to fall back to offering everything Ollama has.
+    # empty and only the chat default is offered - the same list /api/ask
+    # accepts, so the picker can never show a model that is then ignored.
     #
     # Comma-separated, because .env is edited by hand and a JSON array is not.
     # ollama_model stays the default the app answers chat with; this only

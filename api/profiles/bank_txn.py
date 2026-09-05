@@ -57,10 +57,14 @@ METRICS = {
     "entity_count":       "COUNT(DISTINCT t.entity_id)",
     "avg_amount":         "AVG(t.transaction_amount)",
     "max_amount":         "MAX(t.transaction_amount)",
+    # "Smallest transaction" had nowhere to land - the model reached for an
+    # aggregate and answered a total. Mirrors max_amount; same name as the
+    # min_amount FILTER, exactly as max_amount already shares its name.
+    "min_amount":         "MIN(t.transaction_amount)",
 }
 
 MONEY = frozenset({"debit_amount", "credit_amount", "net_amount",
-                   "gross_amount", "avg_amount", "max_amount"})
+                   "gross_amount", "avg_amount", "max_amount", "min_amount"})
 
 FILTERS = {
     "transaction_type": Filt("t.transaction_type",
@@ -93,6 +97,7 @@ FILTERS = {
     # exact `t.account_number IN (%(f_account_numbers_0)s)`.
     "account_numbers": Filt(
         "t.account_number",
+        max_items=5,
         hint="A full account number the user typed, digits only. Use this "
              "whenever the question names a specific account. This FILTERS by "
              "the number - it never displays one."),
@@ -120,8 +125,15 @@ ABSENT_CONCEPTS = (
      "There are no invoices in this data, only settled bank transactions."),
     (r"\w*reconcil\w*",
      "This data has no reconciliation status of any kind."),
-    (r"\bheadcount\b|\bemployees?\b|\bpayroll\b",
-     "There is no employee or payroll data here."),
+    (r"\bheadcount\b|\bemployees?\b|\bpayroll\b|\bsalar(?:y|ies)\b|\bwages?\b",
+     "There is no employee, salary or payroll data here."),
+    # Statements are accounting artefacts built from a ledger with categories
+    # and balances; this data is bank lines only. "Cash flow statement for Q2"
+    # was answered with a net figure, which is not a statement of anything.
+    (r"\bcash\s*flow statement\b|\bbalance sheet\b|\bp\s*&\s*l\b|"
+     r"\bprofit (?:and|&) loss\b|\bincome statement\b|\btrial balance\b",
+     "There are no financial statements here - only bank statement lines, so a "
+     "cash flow statement, P&L or balance sheet cannot be produced from this data."),
     (r"\bdepartments?\b",
      "There are no departments in this data."),
 )
@@ -148,6 +160,10 @@ metric
   "how many accounts"                                 -> account_count
   "who did we pay the most"                           -> group_by ["counterparty"]
   "largest transaction", "biggest single payment"     -> max_amount
+  "smallest transaction", "lowest", "minimum"         -> min_amount
+  "how many entities", "distinct entities"            -> entity_count
+                                                         (an entity is NOT an account;
+                                                          several accounts share one)
   "average transaction"                               -> avg_amount
 
   A "single largest" question wants ONE transaction's amount, so it is

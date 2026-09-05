@@ -230,14 +230,25 @@ def grade_behaviour(q: dict, a: Answer) -> Result:
         # never applied (an empty database says the same thing), so the spec is
         # checked too.
         told = "no transactions match" in notes
-        filtered = bool(((a.spec or {}).get("filters") or {}).get("account_numbers"))
+        # ANY populated filter, not only account_numbers: "how much did we pay
+        # Amazon" is the same shape - a valid filter that matches nothing - and
+        # deserves the same grade. Booleans are excluded so the *_exclusive
+        # flags, which are always present, cannot count as a filter.
+        spec = a.spec or {}
+        filters = spec.get("filters") or {}
+        # A period is scope too: "spend in February 2026" (in coverage, no rows)
+        # narrows the data exactly as a filter does, and the pipeline's own
+        # _has_scope counts it. Without this the honest answer was ungradeable.
+        filtered = any(v not in (None, [], "", False) and not isinstance(v, bool)
+                       for v in filters.values()) \
+            or spec.get("period") is not None or bool(spec.get("fiscal_year"))
         base.actual = ("reported-none" if told else "silent") + (
             "/filtered" if filtered else "/UNFILTERED")
         base.passed = told and filtered
         if not told:
             base.detail = "did not say the result was empty - a bare 0 reads as real"
         elif not filtered:
-            base.detail = "no account filter in the spec; the answer was not scoped"
+            base.detail = "no filter in the spec; an empty answer was not scoped to anything"
 
     elif want == "must_be_unsupported":
         base.actual = f"intent:{intent}" if intent else "no spec"
